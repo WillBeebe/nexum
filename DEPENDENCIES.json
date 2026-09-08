@@ -1,0 +1,26 @@
+[
+  {
+    "module": "golang.org/x/crypto",
+    "version": "v0.54.0",
+    "notices": [
+      "third_party/golang.org/x/crypto@v0.54.0/LICENSE",
+      "third_party/golang.org/x/crypto@v0.54.0/PATENTS"
+    ]
+  },
+  {
+    "module": "github.com/cloudflare/circl",
+    "version": "v1.6.5",
+    "notices": [
+      "third_party/github.com/cloudflare/circl@v1.6.5/LICENSE",
+      "third_party/github.com/cloudflare/circl@v1.6.5/ecc/p384/LICENSE"
+    ]
+  },
+  {
+    "module": "golang.org/x/sys",
+    "version": "v0.47.0",
+    "notices": [
+      "third_party/golang.org/x/sys@v0.47.0/LICENSE",
+      "third_party/golang.org/x/sys@v0.47.0/PATENTS"
+    ]
+  }
+]
