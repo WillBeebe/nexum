@@ -135,3 +135,13 @@ func (l *EncryptedLedger) ProveEqual(sealedSum []byte, committed int64) ([]byte,
 func (l *EncryptedLedger) VerifyEqual(sealedSum []byte, committed int64, proof []byte) (bool, error) {
 	return l.p.VerifyEqual(sealedSum, big.NewInt(committed), proof)
 }
+
+// Clone isolates mutable encryption randomness for a staged lock.
+// Paillier key material is immutable and shared; operations never modify it.
+func (l *EncryptedLedger) Clone() *EncryptedLedger {
+	next := &EncryptedLedger{p: l.p, rs: make([]*big.Int, len(l.rs))}
+	for i, r := range l.rs {
+		next.rs[i] = new(big.Int).Set(r)
+	}
+	return next
+}

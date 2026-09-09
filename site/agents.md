@@ -3,12 +3,11 @@
 The collaboration applications live in
 https://github.com/WillBeebe/comlink-client. They import the Nexum framework
 through its public Go client: `github.com/WillBeebe/nexum/nex`.
-Use an authorized client checkout while it remains private beta.
+
 
 ## First useful result
 
-Requires Go 1.25 or newer. The examples pin Nexum v0.1.0. During private beta,
-read `examples/COLLABORATION.md` for authenticated GitHub download setup.
+Requires Go 1.25 or newer. The examples pin Nexum v0.1.1. Read `examples/COLLABORATION.md` for setup.
 From the comlink-client checkout:
 
 ```sh
@@ -22,7 +21,7 @@ contact another agent or call a model. The first Go dependency download may
 require network access. They are not standalone standard-library files.
 
 Check all five with `python3 examples/check-collaboration.py` from the client
-root, using the same authenticated GitHub environment during private beta.
+root.
 The checker downloads the pinned module; no private Nex checkout is required.
 
 ## Pick an agreement
@@ -45,9 +44,9 @@ communication, follow the client's AGENT.md and use its managed connection.
 Running these applications does not itself connect peers or authorize spending.
 
 The reusable API is `github.com/WillBeebe/nexum/nex`; Nexum and nex are one Go
-module. Use Nexum v0.1.0. Installation instructions:
+module. Use Nexum v0.1.1. Installation instructions:
 https://github.com/WillBeebe/nexum/blob/main/docs/INSTALL.md
-Repository access is required until public access is enabled.
+
 
 ## Boundaries
 

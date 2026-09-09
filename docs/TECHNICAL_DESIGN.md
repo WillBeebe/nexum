@@ -169,15 +169,16 @@ transition; crossing the deadline does not mutate state on its own.
 
 ### Core operations beneath the client
 
-`OpenEscrow` checks distinct nonempty parties and positive amount. The unsealed
+`OpenAgreement` initializes the final contract kind and checks distinct nonempty
+parties and positive amount. `OpenEscrow` retains the house-escrow example and
+its original opening receipt. The unsealed
 path is buyer `Lock`, then seller `Accept` or `Reject`. The sealed path first
 arms a ledger with `StartSealed`; `Apply(seal)` encrypts positive partial amounts
 and maintains their aggregate. Sealed `Apply(accept)` proves/checks equality to
 the committed amount before changing the outcome.
 
-The distinction is security-relevant: direct `Accept` is the ordinary unsealed
-method and does not perform the sealed proof check. Applications must use the
-appropriate dispatch path. The current client does so. Lower-level expiry
+Direct `Accept` and `Apply(accept)` use the same sealed proof check when a
+ledger is armed. Direct `Reject` also dispatches to the sealed path. Lower-level expiry
 allows either party, while this client restricts its expiry command to the buyer.
 The direct accept/reject methods do not enforce deadline windows; that policy
 is supplied by the client.
@@ -227,9 +228,9 @@ flowchart TD
 Actor/state failures and failed metering checks also refuse the operation; they
 are omitted from the diagram to keep the successful path readable. The metering
 check shown applies to this agreement path and is not a CPU or memory quota.
-This diagram does not promise atomic rollback: the client can append evidence
-before sealed acceptance, and failed append can consume a step. Section 6 details
-those failure semantics.
+Failed agreement commands preserve state: settlement stages evidence and
+acceptance together, and sealing stages encryption randomness before committing.
+Section 6 details the in-memory scope of this guarantee.
 
 The L2 arrows are optional: `nex` does not automatically batch or seal a command.
 Independent batch verification checks the supplied history and proof-of-work
@@ -304,23 +305,23 @@ step bound. These fields do not measure CPU, memory, actual inference charges or
 cluster-wide spending. Applications need separate resource quotas and durable
 budget reservations where multiple agreements share a budget.
 
-### An error is not necessarily a rollback
+### Atomic agreement commands
 
-Current transitions mutate objects in place:
+Agreement receipt append checks limits before consuming a step. Sealing stages
+a separate copy of encryption randomness and computes the aggregate before
+committing the receipt, locks and ledger. Client settlement uses
+`AcceptWithEvidence`, which stages evidence and acceptance together; a failed
+proof or step/budget check leaves the receipt head, status and meter unchanged.
 
-- Receipt append increments its step counter before checking some limits.
-- Client settlement appends evidence before equality verification can fail.
-- Sealing can record encryption randomness before a later receipt append fails.
+The staged settlement copies the receipt slice. It shares the ledger only for
+read-only proof operations; sealing separately copies mutable ledger randomness.
+This is a narrowly scoped transition implementation, not a general snapshot API.
+Callers must still serialize access across the entire command.
 
-After an error, an unchanged Status does not prove that all state is unchanged.
-Callers must serialize access across the entire command. A mutex prevents races,
-but does not make the operation transactional or durable. Do not shallow-copy an
-Agreement to implement rollback: keys, slices and ledger state remain shared.
-
-**Proposed:** evaluate against isolated, versioned state and commit all resulting
-state/history together, or provide an equivalent transaction-aware kernel API.
-No public deep snapshot/restore API exists today. This is prerequisite work for
-a service that promises atomic failed commands and reliable restart recovery.
+These guarantees cover in-memory bilateral agreement operations and the public
+contract client. They do not provide durable crash recovery, transactional
+external effects, or change council/delegation/workflow semantics. A versioned
+state format and durable commit protocol remain service integration work.
 
 ## 7. Cryptography and custody
 

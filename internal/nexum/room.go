@@ -26,14 +26,8 @@ func (a *Agreement) Apply(m Move, now time.Time) error {
 	case "seal":
 		return a.sealLock(m.Actor, m.Partial, now)
 	case "accept":
-		if a.isSealed() {
-			return a.acceptSealed(m.Actor, now)
-		}
 		return a.Accept(m.Actor, now)
 	case "reject":
-		if a.isSealed() {
-			return a.rejectSealed(m.Actor, now)
-		}
 		return a.Reject(m.Actor, now)
 	case "takeback":
 		err := a.takeback(m.Actor, now)
@@ -65,20 +59,22 @@ func (a *Agreement) sealLock(actor Party, partial int64, now time.Time) error {
 	if a.Sealed == nil {
 		return ErrNoSeal
 	}
-	ct, err := a.Sealed.SealLock(partial)
+	ledger := a.Sealed.Clone()
+	ct, err := ledger.SealLock(partial)
 	if err != nil {
 		return err
 	}
-	// Receipt note is the ciphertext: the public ledger shows a
-	// sealed partial, never a plaintext number.
+	locks := append(append([][]byte(nil), a.SealedLocks...), ct)
+	sum, err := ledger.Aggregate(locks)
+	if err != nil {
+		return err
+	}
+	// Commit only after encryption, aggregation and receipt checks succeed.
 	if err := a.append(actor, "seal", base64.StdEncoding.EncodeToString(ct), now); err != nil {
 		return err
 	}
-	a.SealedLocks = append(a.SealedLocks, ct)
-	sum, err := a.Sealed.Aggregate(a.SealedLocks)
-	if err != nil {
-		return err
-	}
+	a.Sealed = ledger
+	a.SealedLocks = locks
 	a.SealedSum = sum
 	a.Status = StatusLocked
 	t := now.UTC()

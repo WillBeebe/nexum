@@ -1,5 +1,9 @@
 [
   {
+    "path": "CHANGELOG.md",
+    "sha256": "d60d28871e84a75e787a1065f04473c002088a2fadc714f5617561e15d065483"
+  },
+  {
     "path": "CONTRIBUTING.md",
     "sha256": "c776daa59a7fff461c53a51f256be94c1f1a06c6f86ad353f24c219b23158a4f"
   },
@@ -17,7 +21,7 @@
   },
   {
     "path": "README.md",
-    "sha256": "431ce20e69d65c1728bcb2ca95bfc358438caff5c0eb9ea950c4f7aa3c9a1d1a"
+    "sha256": "567abc20022a4e156494e576559ad8dbc3b472bbf00d3a1b82b73874076ea405"
   },
   {
     "path": "THIRD_PARTY.md",
@@ -29,11 +33,15 @@
   },
   {
     "path": "docs/INSTALL.md",
-    "sha256": "c1c27d1174e2161a432dbf61e36b2aea52b16b3fadb47e126273880c545e2563"
+    "sha256": "ff7b270c2024c8404764f0e2eda842eba432802a77c895dfef3a3663d45cd466"
   },
   {
     "path": "docs/TECHNICAL_DESIGN.md",
-    "sha256": "92b49d03797f9896790338a2a853a1cc8c076bed1a476614008ce46fe91d15ef"
+    "sha256": "f4e9d8415a2a29004292230c10f595df5d36ddfd71e528f5c2850f57068a13c6"
+  },
+  {
+    "path": "examples/README.md",
+    "sha256": "d3301b896089d578c6179fae521a63ab707710f18f5290225764d1580e08c1d7"
   },
   {
     "path": "examples/collective-fund/main.go",
@@ -149,7 +157,7 @@
   },
   {
     "path": "internal/nexum/agreement.go",
-    "sha256": "035c11b2d73019c30dbb822053058ae8d7d1cb52111dd48e112b5356d6f440b1"
+    "sha256": "18d030b27aa1b9b0917d6a5b4869da9135cf962489396ecd810ce23fc186d880"
   },
   {
     "path": "internal/nexum/agreement_test.go",
@@ -173,7 +181,7 @@
   },
   {
     "path": "internal/nexum/room.go",
-    "sha256": "4676113e3f37da7a123132b5ca7d1dc7abdfd49e1c9f1ca843ff055e658dae7c"
+    "sha256": "3978b6ab1462e4bd9f7ebebe366f397512e08d5316475f3557fc98d4ce2f4ac1"
   },
   {
     "path": "internal/nexum/room_sealed_test.go",
@@ -186,6 +194,10 @@
   {
     "path": "internal/nexum/token.go",
     "sha256": "715efc750c751577bedeafee69e196f9ad89bef86790b3ec5f767cdf665dafa6"
+  },
+  {
+    "path": "internal/nexum/transition_test.go",
+    "sha256": "2f7cfbdda4d49a1e77cd98252f827484cc6e83037866ba1c8cf0bd7831223bd5"
   },
   {
     "path": "internal/nexum/workflow.go",
@@ -213,7 +225,7 @@
   },
   {
     "path": "internal/settle/encsum.go",
-    "sha256": "0a58c4cae8eedd9b6d6ca0c2a2f352da2a8210ffafcbcc811e5346413bd31454"
+    "sha256": "ff2f0c56f3df789ba61b6dc465e83ebfb12ae39097cc5f09801cf7f0abf34800"
   },
   {
     "path": "internal/settle/encsum_test.go",
@@ -221,7 +233,11 @@
   },
   {
     "path": "nex/contract.go",
-    "sha256": "3d6d3310f994d4123c662037f05d7b842ae64f919a8b24a87f1a1a904fa54fb1"
+    "sha256": "83a2cf66cd6f3966d0520eb2863b053fbf198e92535762c5c18adfeded8f21b4"
+  },
+  {
+    "path": "nex/contract_atomic_test.go",
+    "sha256": "c2ee3e2d0ba0e6415eda2048521e293d4209147cfe447d7b1f32e291470b216d"
   },
   {
     "path": "nex/contract_test.go",
@@ -277,7 +293,7 @@
   },
   {
     "path": "site/agents.md",
-    "sha256": "edbea791108d91ddff540e3cf3191418ca72cb3b8b23485999df9734a1a81d48"
+    "sha256": "133b7c2fb2592e295bf4ef20f9c9988e81f8aadce8884609726e726fc6a6e122"
   },
   {
     "path": "site/build.py",
@@ -293,7 +309,7 @@
   },
   {
     "path": "site/index.html",
-    "sha256": "8972278db76ff1947c952d1359f361137c1e86999d04f64fe272506924f414b5"
+    "sha256": "45df7ae122a2de16711a213c51f391da0d69e0ab1ef7a7ba168e0d4f57fcd210"
   },
   {
     "path": "site/site.js",
@@ -301,7 +317,7 @@
   },
   {
     "path": "site/style.css",
-    "sha256": "37d3df50703f636c54ebb6832a0a5ec68ea5ef07d087ebce5bc22bfef8a6cc0b"
+    "sha256": "1e04066ac5feaab6ac8db3a17999eb9d4e76d83cad22a06f5d701ac180db3fd1"
   },
   {
     "path": "site/vercel.json",

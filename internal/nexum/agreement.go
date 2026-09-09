@@ -88,8 +88,19 @@ var (
 	ErrNoSeal        = errors.New("nexum: sealed escrow not armed; call StartSealed first")
 )
 
-// OpenEscrow starts a house-escrow Nexum. Status is open until Lock.
+// OpenEscrow preserves the house-escrow acceptance example and its receipt format.
 func OpenEscrow(id string, buyer, seller Party, amount int64, meter Meter, now time.Time) (*Agreement, error) {
+	return openAgreement(id, KindHouseEscrow, buyer, seller, amount, meter, now, "escrow opened")
+}
+
+// OpenAgreement starts a bilateral agreement with its final kind.
+func OpenAgreement(id, kind string, buyer, seller Party, amount int64, meter Meter, now time.Time) (*Agreement, error) {
+	if kind == "" {
+		return nil, errors.New("nexum: agreement kind required")
+	}
+	return openAgreement(id, kind, buyer, seller, amount, meter, now, "agreement opened")
+}
+func openAgreement(id, kind string, buyer, seller Party, amount int64, meter Meter, now time.Time, note string) (*Agreement, error) {
 	if buyer == "" || seller == "" {
 		return nil, ErrMissingParty
 	}
@@ -107,7 +118,7 @@ func OpenEscrow(id string, buyer, seller Party, amount int64, meter Meter, now t
 	}
 	a := &Agreement{
 		ID:        id,
-		Kind:      KindHouseEscrow,
+		Kind:      kind,
 		Buyer:     buyer,
 		Seller:    seller,
 		Amount:    amount,
@@ -115,7 +126,7 @@ func OpenEscrow(id string, buyer, seller Party, amount int64, meter Meter, now t
 		Meter:     meter,
 		CreatedAt: now.UTC(),
 	}
-	if err := a.append(buyer, "open", "escrow opened", now); err != nil {
+	if err := a.append(buyer, "open", note, now); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -142,8 +153,11 @@ func (a *Agreement) Lock(actor Party, now time.Time) error {
 	return nil
 }
 
-// Accept is the seller taking the locked value. Terminal.
+// Accept releases locked value, checking the equality proof when sealed. Terminal.
 func (a *Agreement) Accept(actor Party, now time.Time) error {
+	if a.isSealed() {
+		return a.acceptSealed(actor, now)
+	}
 	if actor != a.Seller {
 		return ErrWrongParty
 	}
@@ -165,6 +179,9 @@ func (a *Agreement) Accept(actor Party, now time.Time) error {
 
 // Reject is the seller returning the locked value to the buyer. Terminal.
 func (a *Agreement) Reject(actor Party, now time.Time) error {
+	if a.isSealed() {
+		return a.rejectSealed(actor, now)
+	}
 	if actor != a.Seller {
 		return ErrWrongParty
 	}
@@ -262,8 +279,7 @@ func (a *Agreement) terminal() bool {
 }
 
 func (a *Agreement) append(actor Party, action, note string, now time.Time) error {
-	a.steps++
-	if a.steps > a.Meter.MaxSteps {
+	if a.steps >= a.Meter.MaxSteps {
 		return ErrDoS
 	}
 	if a.Meter.BudgetUSD > 0 && a.Meter.CostUSD > a.Meter.BudgetUSD {
@@ -283,6 +299,7 @@ func (a *Agreement) append(actor Party, action, note string, now time.Time) erro
 	}
 	r.Hash = hashReceipt(a.ID, r)
 	a.Receipts = append(a.Receipts, r)
+	a.steps++
 	return nil
 }
 
@@ -308,5 +325,22 @@ func (a *Agreement) VerifyReceipts() error {
 		}
 		prev = r.Hash
 	}
+	return nil
+}
+
+// AcceptWithEvidence records evidence and accepts as one in-memory transition.
+// Callers must serialize access. Failed proof or metering checks change no state.
+func (a *Agreement) AcceptWithEvidence(author, actor Party, citation string, now time.Time) error {
+	next := *a
+	// Note and Accept only append receipts and replace scalar/pointer fields.
+	// Equality proving reads the ledger; it does not mutate it.
+	next.Receipts = append([]Receipt(nil), a.Receipts...)
+	if err := next.Note(author, "evidence", citation, now); err != nil {
+		return err
+	}
+	if err := next.Accept(actor, now); err != nil {
+		return err
+	}
+	*a = next
 	return nil
 }

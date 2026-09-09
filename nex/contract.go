@@ -32,14 +32,13 @@ func New(kind string, buyer, seller Public, amount int64, spec any, now, deadlin
 		Spec              any
 		Created, Deadline time.Time
 	}{kind, buyer.ID(), seller.ID(), amount, spec, now, deadline})
-	a, err := nexum.OpenEscrow(id, nexum.Party(buyer.ID()), nexum.Party(seller.ID()), amount, nexum.Meter{MaxSteps: 128}, now)
+	a, err := nexum.OpenAgreement(id, kind, nexum.Party(buyer.ID()), nexum.Party(seller.ID()), amount, nexum.Meter{MaxSteps: 128}, now)
 	if err != nil {
 		return nil, err
 	}
 	if err = a.SetDeadline(a.Buyer, deadline, now); err != nil {
 		return nil, err
 	}
-	a.Kind = kind
 	if err = a.StartSealed(2048); err != nil {
 		return nil, err
 	}
@@ -88,11 +87,8 @@ func (c *Contract) Apply(cmd Command, sig []byte, now time.Time) error {
 		if !c.agreed || cmd.Evidence == "" || a.Status != nexum.StatusLocked {
 			return errors.New("consent and verified evidence required")
 		}
-		if err := a.Note(a.Buyer, "evidence", cmd.Evidence, now); err != nil {
-			return err
-		}
-		// The adapter authorizes the seller's kernel acceptance only after buyer verification.
-		return a.Apply(nexum.Move{Actor: a.Seller, Action: "accept"}, now)
+		// The adapter authorizes kernel acceptance only after buyer verification.
+		return a.AcceptWithEvidence(a.Buyer, a.Seller, cmd.Evidence, now)
 	case "reject":
 		return a.Apply(nexum.Move{Actor: a.Seller, Action: "reject"}, now)
 	default:
