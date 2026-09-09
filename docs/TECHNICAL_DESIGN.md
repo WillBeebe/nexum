@@ -84,6 +84,7 @@ New(kind string, buyer, seller Public, amount int64, spec any,
 (*Contract).Command(action, evidence string) Command
 (*Contract).Apply(command Command, signature []byte, now time.Time) error
 (*Contract).Execute(identity Identity, action, evidence string, now time.Time) error
+(*Contract).ID() string
 (*Contract).Head() string
 (*Contract).Status() Status
 (*Contract).VerifyReceipts() error
@@ -99,14 +100,15 @@ deadline into a SHA-256 digest of a JSON struct. It creates an actual kernel
 agreement, fixes the deadline and arms a 2048-bit Paillier ledger. The digest is
 the agreement ID and command terms commitment. The client sets a 128-step bound.
 
-`spec` must be JSON-serializable. The current `Hash` helper panics on encoding
-failure; it is not suitable for unchecked arbitrary input. Cross-language
-canonical encoding and a fully typed constructor/error model remain API work.
+`spec` must be JSON-serializable; `New` returns an error when specification
+encoding fails. It retains the complete immutable definition for durable storage.
+The standalone `Hash` helper still panics on encoding failure. Cross-language
+canonical encoding remains API work.
 
 Identity types expose byte slices. Callers must treat keys and admitted public
 identity records as immutable and keep private material out of serialization
-and logs. Constructor-owned copies and stronger key-handle APIs are desirable
-before a stable untrusted-input interface is promised.
+and logs. The contract constructor now owns copies of admitted public key
+records. Stronger private key-handle APIs remain separate work.
 
 
 ## 4. Agreement lifecycle and command authorization
@@ -155,16 +157,18 @@ protocol-version migration is defined.
 
 `Apply` executes these checks in order:
 
-1. Require the command's terms commitment and prior head to equal this Contract.
-2. Select seller for `agree`/`reject`, otherwise buyer, and verify its signature.
+1. Select seller for `agree`/`reject`, otherwise buyer, and verify its signature.
+2. Require the command's terms commitment and prior head to equal this Contract.
 3. For `expire`, invoke the kernel's expiry check immediately.
 4. For other actions, require creation time <= supplied time < deadline.
 5. Check action-specific consent/state/evidence and invoke the kernel operation.
 
 A successful command normally changes the head, so replaying its previous
-signed command is refused as stale. There is no operation-ID result cache: a
-caller that loses the response cannot assume that a retry is an idempotent
-success. Unknown actions are refused. Expiry is explicit, not a background
+signed command is refused as stale by the in-memory API. The optional `Store`
+adds a signed `Operation` ID and durable success-result lookup: exact retries
+return their original result, even after restart or a later command. Reusing
+an ID with different content is refused. See [durable agreements](DURABLE_AGREEMENTS.md).
+Unknown actions are refused. Expiry is explicit, not a background
 transition; crossing the deadline does not mutate state on its own.
 
 ### Core operations beneath the client
@@ -318,10 +322,11 @@ read-only proof operations; sealing separately copies mutable ledger randomness.
 This is a narrowly scoped transition implementation, not a general snapshot API.
 Callers must still serialize access across the entire command.
 
-These guarantees cover in-memory bilateral agreement operations and the public
-contract client. They do not provide durable crash recovery, transactional
-external effects, or change council/delegation/workflow semantics. A versioned
-state format and durable commit protocol remain service integration work.
+These kernel guarantees cover in-memory bilateral agreement operations. The
+optional `Store` adds versioned encrypted checkpoints and commits state plus
+successful operation results together across local process restarts. It does
+not add transactional external effects or change council/delegation/workflow
+semantics. The original `Contract` object remains memory-only.
 
 ## 7. Cryptography and custody
 
@@ -369,10 +374,11 @@ of the same proof; the surrounding contract enforces one-time settlement.
 ### What can be hosted today
 
 **Implemented:** embed `nex` in a trusted Go process on your infrastructure.
-Maintain one authoritative in-memory owner per agreement, serialize access and
-supply the clock. This is suitable for controlled integrations where losing
-in-flight state is an explicitly accepted condition. It provides neither
-restart recovery nor safe automatic failover for live obligations.
+Use the in-memory `Contract` for disposable state, or `Store` for local durable
+bilateral agreements. Store serializes separate handles/processes with OS locks,
+restores exact custody state, and makes successful operation retries stable.
+Supply trusted time and protect the storage key separately. This does not
+provide multi-host automatic failover.
 
 **Deployment requirement:** place that process behind your application's
 identity and authorization boundary. Do not allow arbitrary third-party plugins
@@ -381,10 +387,10 @@ agreements. Give work execution separate process/container isolation and only
 the specific resource capabilities that its authorization permits.
 
 A Kubernetes Deployment, additional replicas or a database mounted beside the
-process does not add the missing persistence/ownership protocol. There is no
-production server manifest or supported durable deployment command to provide
-for the current public library. The remainder of this section specifies the
-service contract to implement before claiming those properties.
+process does not add a distributed ownership protocol. Store is a local
+filesystem library, not a production server or multi-host database adapter.
+The remainder of this section separates local durability from the stronger
+service contract still needed for external effects and failover.
 
 ### Identity, ingress and authorization
 
@@ -436,10 +442,12 @@ refuse time-sensitive writes when trusted time is unavailable. Persist relevant
 time boundaries in any durable implementation. The current API accepts a
 supplied timestamp and does not enforce a trusted clock or global monotonic time.
 
-### Durable command protocol — proposed
+### Durable command protocol — local implementation and service extensions
 
-Before hosting restart-safe obligations, add an explicit state representation
-and transaction boundary. At minimum, the durable record needs:
+The local `Store` now has a version-1 encrypted state representation and atomic
+file-replacement boundary. It persists terms, exact agreement state, custody,
+consent, metering, signed operations and their successful outcomes. The service
+extensions below still require ownership epochs and pending external effects:
 
 | Record | Required purpose |
 |---|---|
@@ -453,7 +461,8 @@ and transaction boundary. At minimum, the durable record needs:
 Use an operation identifier bound to tenant, agreement and canonical command.
 The service must reject reuse of the identifier with different content and
 return the stored outcome for an exact completed retry. This behavior is an
-addition to, not a property of, current head-based replay refusal.
+implemented by Store in addition to the in-memory client's head-based refusal.
+Tenant isolation and global ownership epochs remain adapter responsibilities.
 
 ```mermaid
 sequenceDiagram
@@ -483,12 +492,12 @@ validation must be repeated against current state, and external effects must
 not happen inside a transaction that may retry. PostgreSQL is an option, not a
 new Nexum dependency. [PostgreSQL transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html).
 
-Current JSON serialization is not a persistence strategy: `nex.Contract` has
-private fields, and the kernel excludes its ledger from JSON. Recreating the
-constructor regenerates keys; replaying seal commands generates fresh randomness
-and different ciphertext/receipt heads. A correct recovery implementation must
-restore or verifiably reconstruct the exact committed state. An event log of
-commands alone is insufficient with the current randomized transitions.
+Raw JSON serialization is not a persistence strategy: `nex.Contract` has private
+fields and ordinary Agreement JSON excludes its ledger. Store uses an explicit
+private checkpoint that preserves Paillier key material, proof randomness and
+consumed steps inside authenticated encryption. Recreating the constructor or
+replaying encryption with fresh randomness would change receipt heads; recovery
+restores exact committed data instead.
 
 ### External effects and uncertain outcomes
 
@@ -506,9 +515,10 @@ against immutable input/output commitments before authorizing settlement.
 
 ### Restart, backup and failover
 
-Until a persistence interface exists, process loss means in-memory obligations
-cannot safely resume. A restarted instance must not silently recreate them and
-accept new commands as though it recovered the prior state.
+Store-backed obligations resume from authenticated local checkpoints. Memory-only
+obligations still cannot resume after process loss. A restarted instance must
+not silently recreate missing or corrupt stored agreements. Keep the sender's
+signed operation in an application-owned durable outbox until its result is known.
 
 For the proposed durable service, restore state and cryptographic custody as a
 consistent set. Verify schema/protocol versions and history before enabling
@@ -539,10 +549,10 @@ A rollback of binaries is not permission to roll back agreement history.
 | Capability | Current state | Required before a stronger service claim |
 |---|---|---|
 | Signed two-party transitions | Implemented in nex | Ingress admission, tenant policy and trusted time |
-| Concurrent agreement owner | Caller-serialized objects | Per-agreement serialization covering the complete operation |
-| Atomic rejection | Not guaranteed for all failures | Isolated evaluation or transaction-aware kernel changes |
-| Durable recovery | No public snapshot/restore API | Versioned state, custody restoration and crash recovery tests |
-| Reliable retries | Stale heads refused | Durable operation outcome lookup and conflict semantics |
+| Concurrent agreement owner | Store serializes local handles/processes | Distributed ownership and fencing |
+| Atomic rejection | Bilateral kernel and Store preserve state on failed commands | External-effect transactions |
+| Durable recovery | Versioned encrypted Store; tested process-crash recovery | Key management, backup and anti-rollback policy |
+| Reliable retries | Signed IDs, durable outcomes and conflict refusal in Store | Sender outbox and external-effect reconciliation |
 | Real resource enforcement | Application responsibility | Reservations, deduplicated effects and reconciliation |
 | Failover | No ownership protocol | Fenced epochs and anti-rollback recovery |
 | Independent audit | Local hash-chain checks | Signed portable history and trusted checkpoints |
@@ -556,7 +566,7 @@ state and external effect, not merely that a request returned an error.
 
 ## 10. Decisions for kernel review
 
-1. Define an atomic transition interface and a complete versioned state format.
+1. Extend local versioned storage with migration, anti-rollback and ownership fencing.
 2. Specify canonical signed bytes, domain/version rules and unique instance IDs.
 3. Define jointly authorized amendments, identity changes and expiry authority.
 4. Expose a portable signed receipt bundle with explicit verification guarantees.

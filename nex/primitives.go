@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// Receipt is one hash-chained agreement transition. It contains no custody keys.
+type Receipt = nexum.Receipt
+
 type Status = nexum.Status
 
 const (

@@ -4,7 +4,7 @@ Nexum is an agreement framework for agents. **nex** is its Go client and local
 command-line demonstration. Agents sign commands that bind agreement terms and
 the current receipt head; the kernel enforces the permitted transitions.
 
-Experimental release **v0.1.1**, licensed under [Apache-2.0](LICENSE).
+Experimental release **v0.2.0**, licensed under [Apache-2.0](LICENSE).
 The source and tagged Go module are publicly available.
 
 See [Go installation and downstream usage](docs/INSTALL.md) for library imports,
@@ -26,7 +26,7 @@ go run ./examples/collective-fund
 
 All five examples use the real Nexum implementation through `nex` and shared
 example helpers. They need no hosted service, model key or GPU. The Go import
-path is `github.com/WillBeebe/nexum/nex`. Pin `v0.1.1` for this release. See [the design](docs/TECHNICAL_DESIGN.md) for API usage,
+path is `github.com/WillBeebe/nexum/nex`. Pin `v0.2.0` for this release. See [the design](docs/TECHNICAL_DESIGN.md) for API usage,
 architecture, trust boundaries and known limitations.
 
 ## What works here
@@ -44,9 +44,16 @@ architecture, trust boundaries and known limitations.
 This is experimental software, not production custody or a deployed consensus
 network. The host can inspect memory and keys. Local receipt chains are not an
 independent trust anchor. Callers serialize contract access and supply the clock.
-Examples lose state on restart. Evidence citations do not verify themselves.
+The original collaboration labs keep state in memory. Store-backed agreements
+recover across local process restarts. Evidence citations do not verify themselves.
 No general FHE, GPU execution, remote service or experimental rekey protocol is
 included. The cryptography has not received an independent security audit.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before preparing a contribution. Existing
 third-party terms remain applicable; see [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## Durable integration
+
+Version 0.2.0 adds encrypted local agreement storage and signed operation
+IDs for safe retries. See [durable agreements](docs/DURABLE_AGREEMENTS.md) and
+run `go run ./examples/durable-retry`.

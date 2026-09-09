@@ -1,7 +1,7 @@
 [
   {
     "path": "CHANGELOG.md",
-    "sha256": "d60d28871e84a75e787a1065f04473c002088a2fadc714f5617561e15d065483"
+    "sha256": "3002a601179e4636879493e54bce8e0dda6c6eb0d070240ec70d23e85c953ed1"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -21,7 +21,7 @@
   },
   {
     "path": "README.md",
-    "sha256": "567abc20022a4e156494e576559ad8dbc3b472bbf00d3a1b82b73874076ea405"
+    "sha256": "3bb31fc3d8ccc65d94392fa360030746b2998b344fa506a2e7894b4072de5698"
   },
   {
     "path": "THIRD_PARTY.md",
@@ -32,16 +32,20 @@
     "sha256": "81ac917eb0a0027df90ecb190cd3d341f577716af4d148ec4ddf75f186cdac75"
   },
   {
+    "path": "docs/DURABLE_AGREEMENTS.md",
+    "sha256": "bdac8d44a5e7919d30b949cb1cf7d50c42df9caff8e13c52fd9ff5765496367b"
+  },
+  {
     "path": "docs/INSTALL.md",
-    "sha256": "ff7b270c2024c8404764f0e2eda842eba432802a77c895dfef3a3663d45cd466"
+    "sha256": "5bbd907be84553f81c5a1b2659e7ad372a6c8664ce7f00a425d2b44726400896"
   },
   {
     "path": "docs/TECHNICAL_DESIGN.md",
-    "sha256": "f4e9d8415a2a29004292230c10f595df5d36ddfd71e528f5c2850f57068a13c6"
+    "sha256": "6c038337542ebbec0b83fdb6b147993951047bda0105c7ca92bc435c442583dd"
   },
   {
     "path": "examples/README.md",
-    "sha256": "d3301b896089d578c6179fae521a63ab707710f18f5290225764d1580e08c1d7"
+    "sha256": "58352b85a0248e44ec40d6369a0a1e6393d69ace98bc88ccc6a49e4a17cb81b0"
   },
   {
     "path": "examples/collective-fund/main.go",
@@ -66,6 +70,14 @@
   {
     "path": "examples/delegation/main_test.go",
     "sha256": "0871e2ea6155e65a20a395a635fbd75b509661d8531b8294f27066bce4eb50fd"
+  },
+  {
+    "path": "examples/durable-retry/main.go",
+    "sha256": "45a8c55f91a126e4ded51ee3ae844590167d8a08f023697cb8a12648e92c308d"
+  },
+  {
+    "path": "examples/durable-retry/main_test.go",
+    "sha256": "119d8d947ee9037b630adee488e0ae2e80efeb7e182d63bb5e0fe7589277a021"
   },
   {
     "path": "examples/internal/lab/lab.go",
@@ -94,6 +106,10 @@
   {
     "path": "go.sum",
     "sha256": "11179659d4f6f047f0e550c283f9da4b5ecd91764e2afa57805c0482c9b2f279"
+  },
+  {
+    "path": "internal/he/checkpoint.go",
+    "sha256": "9556d513d6bee9b7563e56c12d2d70bd7c614401b40efd9ebf92cab8f31e970e"
   },
   {
     "path": "internal/he/he.go",
@@ -164,6 +180,10 @@
     "sha256": "44561ffcd454827ab11de501f8c278aff99f56be4b95f8cac0b09d40b3759308"
   },
   {
+    "path": "internal/nexum/checkpoint.go",
+    "sha256": "c0ad4b61dbb2517a763ad56ebfc9097355ff690fce10dbab3623baac28c0296f"
+  },
+  {
     "path": "internal/nexum/council.go",
     "sha256": "8bb8b2b1ba85f1ffceade71756d21fb8931bea9c4e108390a9e55e320b036c32"
   },
@@ -224,6 +244,10 @@
     "sha256": "7db85efd61a467a3006d48c9ae2b2859782a27f1394edfb35ebeb8415fd18a31"
   },
   {
+    "path": "internal/settle/checkpoint.go",
+    "sha256": "1c312af7c5848d1ab5e9e45a3101bd791edc4e46084972374b50d2cedf220979"
+  },
+  {
     "path": "internal/settle/encsum.go",
     "sha256": "ff2f0c56f3df789ba61b6dc465e83ebfb12ae39097cc5f09801cf7f0abf34800"
   },
@@ -233,7 +257,7 @@
   },
   {
     "path": "nex/contract.go",
-    "sha256": "83a2cf66cd6f3966d0520eb2863b053fbf198e92535762c5c18adfeded8f21b4"
+    "sha256": "2f2fff6552894f123d8cab56d30ca7ac3b7c4a4ce41dba48ba822fa7d198e117"
   },
   {
     "path": "nex/contract_atomic_test.go",
@@ -245,7 +269,7 @@
   },
   {
     "path": "nex/doc.go",
-    "sha256": "651ebd25b5b563fe477c11e04e0ecac66badf2191981cc4b08d73e76dc56e3a7"
+    "sha256": "8e8f921441629a030568eb1e0720aa8be9c77df7e0345a8db5b46a700a5a8533"
   },
   {
     "path": "nex/identity.go",
@@ -253,7 +277,23 @@
   },
   {
     "path": "nex/primitives.go",
-    "sha256": "bbc29d87b5158c75bd7cf26e544d281f0bf192c83a0d33232584c3f4f1940c22"
+    "sha256": "b401357efe0e19cbc2cb3d1dca0c68dee7148e90367ae0214f6a1272e5d23c15"
+  },
+  {
+    "path": "nex/store.go",
+    "sha256": "270a50b972d02b71821fd10be188e558971fd44a1f378cf70792a8df1c6179e6"
+  },
+  {
+    "path": "nex/store_lock_other.go",
+    "sha256": "bd27f2b3a408f3fc08adcfb25c0b48e4f55e61c978885c55a280b4f1a637765e"
+  },
+  {
+    "path": "nex/store_lock_unix.go",
+    "sha256": "9177c5d1d19a073ffbe06b8803b735f7ca7b4eadb82250880f5e551206d3a436"
+  },
+  {
+    "path": "nex/store_test.go",
+    "sha256": "42f6b615c51b7bc763c7e73d65c2f500383c241541830a2dfeb5db4bdb44fc02"
   },
   {
     "path": "quarry/keccak/LICENSE",
@@ -293,7 +333,7 @@
   },
   {
     "path": "site/agents.md",
-    "sha256": "133b7c2fb2592e295bf4ef20f9c9988e81f8aadce8884609726e726fc6a6e122"
+    "sha256": "5e87e904b8f2e9e3c0dcfc0d5131ae8e0c446d4e3292b12f6eb78ab1ef490a87"
   },
   {
     "path": "site/build.py",
@@ -309,7 +349,7 @@
   },
   {
     "path": "site/index.html",
-    "sha256": "45df7ae122a2de16711a213c51f391da0d69e0ab1ef7a7ba168e0d4f57fcd210"
+    "sha256": "f3e42ea521dade48ea94024043756c9cee068a494b786c607d9eee2a888d5139"
   },
   {
     "path": "site/site.js",

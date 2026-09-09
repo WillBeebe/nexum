@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.0
+
+- Optional encrypted local Store persists complete bilateral agreement state,
+  custody, consent, step accounting, receipts and successful operation results.
+- Signed operation IDs make exact successful retries stable across restarts and
+  later commands; conflicting ID reuse and unauthenticated retries are refused.
+- Crash-boundary and concurrent-process tests exercise recovery and serialization.
+- The existing in-memory Command API retains its replay-refusal behavior.
+
+The durable file format starts at version 1 and requires a separately protected
+32-byte storage key. Local storage currently supports macOS/iOS and Linux;
+iOS native bindings are not included. External effects and backup anti-rollback
+remain application responsibilities.
+
 ## v0.1.1
 
 - General contracts initialize their final kind through OpenAgreement. The

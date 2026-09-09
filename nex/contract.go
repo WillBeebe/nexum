@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/WillBeebe/nexum/internal/nexum"
@@ -9,14 +10,25 @@ import (
 
 // Contract is owned by a trusted local adapter. Callers must serialize access.
 // Signatures bind immutable terms and the current receipt head. Actual currency
-// custody, persistence and cross-process identity admission are outside this lab.
+// custody and cross-process identity admission remain application responsibilities.
 type Contract struct {
 	agreement     *nexum.Agreement
 	terms         string
 	buyer, seller Public
 	agreed        bool
+	definition    Terms
 }
 type Command struct{ Terms, Head, Action, Evidence string }
+
+// Terms is the immutable agreement definition committed by Contract.ID.
+// Buyer and Seller are public identity IDs. Spec is JSON, not executable code.
+type Terms struct {
+	Kind              string
+	Buyer, Seller     string
+	Amount            int64
+	Spec              json.RawMessage
+	Created, Deadline time.Time
+}
 
 func New(kind string, buyer, seller Public, amount int64, spec any, now, deadline time.Time) (*Contract, error) {
 	if err := buyer.Validate(); err != nil {
@@ -25,13 +37,12 @@ func New(kind string, buyer, seller Public, amount int64, spec any, now, deadlin
 	if err := seller.Validate(); err != nil {
 		return nil, err
 	}
-	id := Hash(struct {
-		Kind              string
-		Buyer, Seller     string
-		Amount            int64
-		Spec              any
-		Created, Deadline time.Time
-	}{kind, buyer.ID(), seller.ID(), amount, spec, now, deadline})
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return nil, fmt.Errorf("contract specification: %w", err)
+	}
+	definition := Terms{kind, buyer.ID(), seller.ID(), amount, raw, now, deadline}
+	id := Hash(definition)
 	a, err := nexum.OpenAgreement(id, kind, nexum.Party(buyer.ID()), nexum.Party(seller.ID()), amount, nexum.Meter{MaxSteps: 128}, now)
 	if err != nil {
 		return nil, err
@@ -42,8 +53,19 @@ func New(kind string, buyer, seller Public, amount int64, spec any, now, deadlin
 	if err = a.StartSealed(2048); err != nil {
 		return nil, err
 	}
-	return &Contract{agreement: a, terms: id, buyer: buyer, seller: seller}, nil
+	// Own the key slices rather than retaining caller-mutable identity data.
+	buyer = clonePublic(buyer)
+	seller = clonePublic(seller)
+	return &Contract{agreement: a, terms: id, buyer: buyer, seller: seller, definition: definition}, nil
 }
+
+func clonePublic(p Public) Public {
+	p.Signing = append(p.Signing[:0:0], p.Signing...)
+	p.Encryption = append(p.Encryption[:0:0], p.Encryption...)
+	return p
+}
+
+func (c *Contract) ID() string { return c.terms }
 func (c *Contract) Command(action, evidence string) Command {
 	return Command{c.terms, c.Head(), action, evidence}
 }
@@ -51,16 +73,23 @@ func (c *Contract) Head() string          { r := c.agreement.Receipts; return r[
 func (c *Contract) Status() nexum.Status  { return c.agreement.Status }
 func (c *Contract) VerifyReceipts() error { return c.agreement.VerifyReceipts() }
 func (c *Contract) Apply(cmd Command, sig []byte, now time.Time) error {
+	if err := Verify(c.signer(cmd.Action), "contract", cmd, sig); err != nil {
+		return err
+	}
+	return c.applyVerified(cmd, sig, now)
+}
+
+func (c *Contract) signer(action string) Public {
+	if action == "agree" || action == "reject" {
+		return c.seller
+	}
+	return c.buyer
+}
+
+func (c *Contract) applyVerified(cmd Command, sig []byte, now time.Time) error {
 	a := c.agreement
 	if cmd.Terms != c.terms || cmd.Head != c.Head() {
 		return errors.New("stale or foreign command")
-	}
-	signer := c.buyer
-	if cmd.Action == "agree" || cmd.Action == "reject" {
-		signer = c.seller
-	}
-	if err := Verify(signer, "contract", cmd, sig); err != nil {
-		return err
 	}
 	if cmd.Action == "expire" {
 		return a.Expire(a.Buyer, now)

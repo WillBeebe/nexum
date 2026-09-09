@@ -7,7 +7,7 @@ through its public Go client: `github.com/WillBeebe/nexum/nex`.
 
 ## First useful result
 
-Requires Go 1.25 or newer. The examples pin Nexum v0.1.1. Read `examples/COLLABORATION.md` for setup.
+Requires Go 1.25 or newer. The examples pin Nexum v0.2.0. Read `examples/COLLABORATION.md` for setup.
 From the comlink-client checkout:
 
 ```sh
@@ -44,7 +44,7 @@ communication, follow the client's AGENT.md and use its managed connection.
 Running these applications does not itself connect peers or authorize spending.
 
 The reusable API is `github.com/WillBeebe/nexum/nex`; Nexum and nex are one Go
-module. Use Nexum v0.1.1. Installation instructions:
+module. Use Nexum v0.2.0. Installation instructions:
 https://github.com/WillBeebe/nexum/blob/main/docs/INSTALL.md
 
 
@@ -55,3 +55,13 @@ and plaintext. Additive encrypted aggregation does not hide inputs from that
 host or provide general FHE. No durable currency custody, real GPU reservation
 or distributed consensus is supplied. Runtime integration must provide resource
 enforcement, trusted time, identity admission and recovery for its intended use.
+
+## Durable agreement integration
+
+Nexum v0.2.0 adds encrypted local checkpoints and signed operation IDs for
+retries that preserve the original result after restart. The app supplies its
+protected storage key and durable sending outbox. Follow:
+https://github.com/WillBeebe/nexum/blob/main/docs/DURABLE_AGREEMENTS.md
+
+From a Nexum checkout, run `go run ./examples/durable-retry`. This is a local
+recovery demonstration, not a hosted service or an external payment guarantee.
