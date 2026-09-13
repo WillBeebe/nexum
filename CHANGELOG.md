@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0
+
+- Protocol is an amount-free agreement and delegation API: admission, scoped
+  roles, work and failure reports, independent witness review, resolution and
+  a required return manifest. Completion means return obligations were met;
+  a failed attempt can complete without being rewritten as success.
+- ProtocolStore reuses the encrypted local checkpoint, exact signed retries
+  and conflict rules already used by Store.
+- The optional adapter package retains exact signed commands, reconciles lost
+  responses, keeps external effects uncertain unless the destination can prove
+  them, and proves stopped-writer fenced owner replacement in a synthetic
+  harness. It is not a consensus or fleet coordinator.
+- Examples: `return-handoff` and `reconcile-handoff`.
+
+Existing bilateral Contract and Store APIs remain compatible. Distributed
+ownership and production fencing remain application responsibilities.
+
 ## v0.2.0
 
 - Optional encrypted local Store persists complete bilateral agreement state,

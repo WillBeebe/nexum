@@ -1,5 +1,7 @@
-// Package nex is the local Nexum client: signed agreement commands, receipt
-// verification, consent-gated encrypted artifacts and additive settlement.
+// Package nex is the local Nexum agreement and delegation framework: purpose,
+// signed admission, scoped roles, work/failure evidence, independent witness,
+// and enforceable return/handoff. Protocol requires no amount or token.
+// Legacy bilateral contracts and consent-gated encrypted artifacts remain available.
 // It uses the same kernel as Nexum's internal callers. No service is required.
 //
 // Contract callers must serialize access; Store serializes local durable operations.

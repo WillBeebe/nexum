@@ -246,31 +246,39 @@ func (s *Store) withLock(id string, fn func() error) error {
 	return fn()
 }
 
-func (s *Store) read(id string) (storedContract, *Contract, error) {
-	var record storedContract
+func (s *Store) readEncrypted(id string) ([]byte, error) {
 	f, err := os.Open(s.path(id))
 	if errors.Is(err, os.ErrNotExist) {
-		return record, nil, ErrNotFound
+		return nil, ErrNotFound
 	}
 	if err != nil {
-		return record, nil, err
+		return nil, err
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxCheckpoint+1))
 	if err != nil {
-		return record, nil, err
+		return nil, err
 	}
 	n := s.aead.NonceSize()
 	if len(data) > maxCheckpoint || len(data) < len(storeHeader)+n+s.aead.Overhead() {
-		return record, nil, ErrCorruptStore
+		return nil, ErrCorruptStore
 	}
 	if string(data[:len(storeHeader)]) != storeHeader {
-		return record, nil, ErrStoreVersion
+		return nil, ErrStoreVersion
 	}
 	nonce := data[len(storeHeader) : len(storeHeader)+n]
 	plain, err := s.aead.Open(nil, nonce, data[len(storeHeader)+n:], []byte(storeHeader+"/"+id))
 	if err != nil {
-		return record, nil, ErrCorruptStore
+		return nil, ErrCorruptStore
+	}
+	return plain, nil
+}
+
+func (s *Store) read(id string) (storedContract, *Contract, error) {
+	var record storedContract
+	plain, err := s.readEncrypted(id)
+	if err != nil {
+		return record, nil, err
 	}
 	if err = json.Unmarshal(plain, &record); err != nil {
 		return record, nil, ErrCorruptStore
@@ -375,7 +383,7 @@ func (s *Store) hook(stage string) error {
 	return nil
 }
 
-func (s *Store) write(id string, record storedContract) error {
+func (s *Store) write(id string, record any) error {
 	plain, err := json.Marshal(record)
 	if err != nil {
 		return err

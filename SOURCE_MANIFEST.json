@@ -1,7 +1,7 @@
 [
   {
     "path": "CHANGELOG.md",
-    "sha256": "3002a601179e4636879493e54bce8e0dda6c6eb0d070240ec70d23e85c953ed1"
+    "sha256": "7f3b376bbda3431c539ed2b5cb1ef2242098ef31af821feb9611659e587540da"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -21,11 +21,63 @@
   },
   {
     "path": "README.md",
-    "sha256": "3bb31fc3d8ccc65d94392fa360030746b2998b344fa506a2e7894b4072de5698"
+    "sha256": "8d71daf285224ae07b30de0cde59ea133a0f70454eee8a0a599c4623328a0ccd"
   },
   {
     "path": "THIRD_PARTY.md",
     "sha256": "90101cd102524ba13ca18e418b65b80beb17ae4f8b2806bb0989f0987a2942ef"
+  },
+  {
+    "path": "adapter/authority.go",
+    "sha256": "0e2e51ad3d7903a3634b21ef5827fec3c999d01722ffbb64fb5acb5481b00c62"
+  },
+  {
+    "path": "adapter/doc.go",
+    "sha256": "915eef589ad5ca551e66226209b7067c91d21d9bb1765e28e68b385a5b888ede"
+  },
+  {
+    "path": "adapter/effect.go",
+    "sha256": "ef0ef4b7f38ce3a8a183e02dfe113a88157b63c38308c19fb7837c28b506369e"
+  },
+  {
+    "path": "adapter/encode.go",
+    "sha256": "bb4055e2ec170f5fa875b6c9e43951563af42a10e53b06ecbf4ba49733e9e07f"
+  },
+  {
+    "path": "adapter/fence.go",
+    "sha256": "bcbcaf65cb9ba17a10fe28c2f1f12e15c509acbcfd67a05207273c285889afeb"
+  },
+  {
+    "path": "adapter/fence_test.go",
+    "sha256": "b091a183f25a5c669222c7022807971a0b7fa2dd5bc2a95972941706775f1fd4"
+  },
+  {
+    "path": "adapter/helper_test.go",
+    "sha256": "1e7021eee8c9af6beb9bcfbf0531c271c273bc271cfe5571b0eeb988bc9b9693"
+  },
+  {
+    "path": "adapter/lock_other.go",
+    "sha256": "162130cfe7c509c20150c12f919647029e80264dac5baaaf1197c20c3c828645"
+  },
+  {
+    "path": "adapter/lock_unix.go",
+    "sha256": "618b0e72e1fd04d9e9ef1b1fb14431dde5f708dcbeb020aef12db783c3f84054"
+  },
+  {
+    "path": "adapter/outbox.go",
+    "sha256": "14a16e04c73052d25c41b7680c6afe60cbd98d00bd5ad5b15a797459e2ca2114"
+  },
+  {
+    "path": "adapter/reconcile_test.go",
+    "sha256": "f558dc1a93f50543347fce0b4588838299fa99ab08784984a2124fbb54c64821"
+  },
+  {
+    "path": "adapter/types.go",
+    "sha256": "30468537517efbfd0722e665a6da31ac13ac507b57a43b4086dfb45ed0b931f5"
+  },
+  {
+    "path": "adapter/vault.go",
+    "sha256": "d2873b63ea4a41122cdddada97a2f36220c947453efb9dc4f830dfc64b944b1b"
   },
   {
     "path": "cmd/nex/main.go",
@@ -37,7 +89,7 @@
   },
   {
     "path": "docs/INSTALL.md",
-    "sha256": "5bbd907be84553f81c5a1b2659e7ad372a6c8664ce7f00a425d2b44726400896"
+    "sha256": "a870b7187ec80e9a204aac61fb443c4f2eb77bd9696c950abdb68ce276a1bd50"
   },
   {
     "path": "docs/TECHNICAL_DESIGN.md",
@@ -45,7 +97,7 @@
   },
   {
     "path": "examples/README.md",
-    "sha256": "58352b85a0248e44ec40d6369a0a1e6393d69ace98bc88ccc6a49e4a17cb81b0"
+    "sha256": "c3e5c79dc49319af5b78d1dd90888bb50561c612525e27ee596550684a7293e9"
   },
   {
     "path": "examples/collective-fund/main.go",
@@ -90,6 +142,18 @@
   {
     "path": "examples/knowledge-exchange/main_test.go",
     "sha256": "b0b6adb722a0ae6395d2d440fd27807c7ad9c1de8cefe5e393ab9b55fc121b09"
+  },
+  {
+    "path": "examples/reconcile-handoff/main.go",
+    "sha256": "dc4d8b2f61bd8cdbde83566d7f16d4971701d5474a6fd97a713b7969157bd0ee"
+  },
+  {
+    "path": "examples/reconcile-handoff/main_test.go",
+    "sha256": "0ea37e33730f7d68f56daaf48aaf60a48191d9a144198ed9a26306e5ba664409"
+  },
+  {
+    "path": "examples/return-handoff/main.go",
+    "sha256": "d3c8bf9df234029a05e06ac45dbac0c3568e3acd55fdd7580809b62f502cabef"
   },
   {
     "path": "examples/work-bounty/main.go",
@@ -269,7 +333,7 @@
   },
   {
     "path": "nex/doc.go",
-    "sha256": "8e8f921441629a030568eb1e0720aa8be9c77df7e0345a8db5b46a700a5a8533"
+    "sha256": "4fc84a59be57351c01beab552cd5746e2e93b8b3b94c3566d6f90bd31efac9ea"
   },
   {
     "path": "nex/identity.go",
@@ -280,8 +344,20 @@
     "sha256": "b401357efe0e19cbc2cb3d1dca0c68dee7148e90367ae0214f6a1272e5d23c15"
   },
   {
+    "path": "nex/protocol.go",
+    "sha256": "b69952a7542032fb94493b60054b9910ad684561aa511cb82642a1ff7e7d2562"
+  },
+  {
+    "path": "nex/protocol_store.go",
+    "sha256": "09f3ce1fe50ee24087bb78e33f3120a2e13ee4b95266c46f60a892402c260d0d"
+  },
+  {
+    "path": "nex/protocol_test.go",
+    "sha256": "8d912f8005030d8af23ddd13d77f33fe4323ad9bd1802366f7b8c03fef9f3851"
+  },
+  {
     "path": "nex/store.go",
-    "sha256": "270a50b972d02b71821fd10be188e558971fd44a1f378cf70792a8df1c6179e6"
+    "sha256": "f693a851d239876fffd897a40b042604954aa27111e54817ae692e60920182ce"
   },
   {
     "path": "nex/store_lock_other.go",
