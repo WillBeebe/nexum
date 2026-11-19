@@ -1,10 +1,93 @@
 package he
 
 import (
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
 )
+
+func TestEqualityProofRejectsPublicModulusForgery(t *testing.T) {
+	p, err := NewPaillier(1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This forgery needs only the public modulus. Previously c=n, a=n, z=0
+	// made both sides zero modulo n² for every positive challenge, so it
+	// passed for any claimed message despite c not being a ciphertext.
+	n := p.N().Bytes()
+	proof, err := json.Marshal(zkProof{A: n, Z: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claimed := range []int64{1, 7, 9000} {
+		if ok, err := p.VerifyEqual(n, big.NewInt(claimed), proof); err != nil || ok {
+			t.Fatalf("nonunit forgery for %d: accepted=%v err=%v", claimed, ok, err)
+		}
+	}
+}
+
+func TestPaillierRejectsNonUnits(t *testing.T) {
+	// Small known factors let this test exercise proper divisors, which are
+	// inside the accepted range but outside the multiplicative group.
+	p := &Paillier{n: big.NewInt(15), n2: big.NewInt(225), g: big.NewInt(16), lambda: big.NewInt(4), mu: big.NewInt(4)}
+	m, r := big.NewInt(7), big.NewInt(2)
+	ct, err := p.EncryptWithR(m, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := p.ProveEqual(ct, m, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := p.VerifyEqual(ct, m, proof); err != nil || !ok {
+		t.Fatalf("honest proof rejected: %v %v", ok, err)
+	}
+	for _, value := range []int64{0, 3, 5, 15, 225} {
+		bad := big.NewInt(value).Bytes()
+		if _, err := p.Add(ct, bad); err != ErrAdd {
+			t.Fatalf("Add accepted nonunit %d: %v", value, err)
+		}
+		if _, err := p.Add(bad, ct); err != ErrAdd {
+			t.Fatalf("Add accepted first nonunit %d: %v", value, err)
+		}
+		if _, err := p.Decrypt(bad); err != ErrDec {
+			t.Fatalf("Decrypt accepted nonunit %d: %v", value, err)
+		}
+		if _, err := p.ProveEqual(bad, m, r); err != ErrEnc {
+			t.Fatalf("ProveEqual accepted nonunit ciphertext %d: %v", value, err)
+		}
+		if _, err := p.EncryptWithR(m, big.NewInt(value)); err != ErrEnc {
+			t.Fatalf("EncryptWithR accepted nonunit randomness %d: %v", value, err)
+		}
+		if _, err := p.ProveEqual(ct, m, big.NewInt(value)); err != ErrEnc {
+			t.Fatalf("ProveEqual accepted nonunit randomness %d: %v", value, err)
+		}
+		var original zkProof
+		if err := json.Unmarshal(proof, &original); err != nil {
+			t.Fatal(err)
+		}
+		for _, malformed := range []zkProof{{A: bad, Z: original.Z}, {A: original.A, Z: bad}} {
+			encoded, err := json.Marshal(malformed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := p.VerifyEqual(ct, m, encoded); err != nil || ok {
+				t.Fatalf("VerifyEqual accepted nonunit component %d: %v %v", value, ok, err)
+			}
+		}
+	}
+	for range 128 {
+		ciphertext, err := p.Encrypt(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := p.Decrypt(ciphertext)
+		if err != nil || got.Cmp(m) != 0 {
+			t.Fatalf("sampler emitted nonunit randomness: %v %v", got, err)
+		}
+	}
+}
 
 // TestBackboneIsReal: additive PHE is wired — but prove it, do not
 // stamp it. Keygen, encrypt, homomorphic add, decrypt round-trip.

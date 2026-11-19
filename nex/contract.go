@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/WillBeebe/nexum/internal/nexum"
+	"strings"
 	"time"
+
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
 )
 
 // Contract is owned by a trusted local adapter. Callers must serialize access.
@@ -16,7 +18,16 @@ type Contract struct {
 	terms         string
 	buyer, seller Public
 	agreed        bool
+	consent       []ConsentEvent
 	definition    Terms
+}
+
+// ConsentEvent is recorded consent. Agree followed by reject or expiry keeps
+// the earlier consent. Agreed reports that historical fact. Phase reports
+// the current lifecycle, including agreed only while the escrow is still locked.
+type ConsentEvent struct {
+	Action string
+	Head   string
 }
 type Command struct{ Terms, Head, Action, Evidence string }
 
@@ -66,6 +77,30 @@ func clonePublic(p Public) Public {
 }
 
 func (c *Contract) ID() string { return c.terms }
+
+// Agreed reports that seller consent was recorded. Rejection and expiry do
+// not erase that fact.
+func (c *Contract) Agreed() bool { return c != nil && c.agreed }
+
+// Phase is the current wrapper phase. It is derived from status plus whether
+// consent is the latest open decision, not a second stored lifecycle.
+func (c *Contract) Phase() string {
+	if c == nil || c.agreement == nil {
+		return ""
+	}
+	if c.agreement.Status == nexum.StatusLocked && c.agreed {
+		return "agreed"
+	}
+	return string(c.agreement.Status)
+}
+
+// ConsentHistory returns recorded consent events in order.
+func (c *Contract) ConsentHistory() []ConsentEvent {
+	if c == nil {
+		return nil
+	}
+	return append([]ConsentEvent(nil), c.consent...)
+}
 func (c *Contract) Command(action, evidence string) Command {
 	return Command{c.terms, c.Head(), action, evidence}
 }
@@ -92,7 +127,13 @@ func (c *Contract) applyVerified(cmd Command, sig []byte, now time.Time) error {
 		return errors.New("stale or foreign command")
 	}
 	if cmd.Action == "expire" {
-		return a.Expire(a.Buyer, now)
+		if err := a.Expire(a.Buyer, now); err != nil {
+			return err
+		}
+		if c.agreed {
+			c.consent = append(c.consent, ConsentEvent{Action: "expire", Head: c.Head()})
+		}
+		return nil
 	}
 	if now.Before(a.CreatedAt) || !now.Before(a.Deadline) {
 		return errors.New("outside agreement time window")
@@ -111,6 +152,7 @@ func (c *Contract) applyVerified(cmd Command, sig []byte, now time.Time) error {
 			return err
 		}
 		c.agreed = true
+		c.consent = append(c.consent, ConsentEvent{Action: "agree", Head: c.Head()})
 		return nil
 	case "settle":
 		if !c.agreed || cmd.Evidence == "" || a.Status != nexum.StatusLocked {
@@ -119,11 +161,36 @@ func (c *Contract) applyVerified(cmd Command, sig []byte, now time.Time) error {
 		// The adapter authorizes kernel acceptance only after buyer verification.
 		return a.AcceptWithEvidence(a.Buyer, a.Seller, cmd.Evidence, now)
 	case "reject":
-		return a.Apply(nexum.Move{Actor: a.Seller, Action: "reject"}, now)
+		if err := a.Apply(nexum.Move{Actor: a.Seller, Action: "reject"}, now); err != nil {
+			return err
+		}
+		if c.agreed {
+			c.consent = append(c.consent, ConsentEvent{Action: "reject", Head: c.Head()})
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown command %q", cmd.Action)
 	}
 }
+func (c *Contract) rebuildConsent() {
+	if c == nil || c.agreement == nil {
+		return
+	}
+	c.consent = nil
+	agreed := false
+	for _, r := range c.agreement.Receipts {
+		switch {
+		case r.Action == "evidence" && strings.HasPrefix(r.Note, "signed-consent:"):
+			c.consent = append(c.consent, ConsentEvent{Action: "agree", Head: r.Hash})
+			agreed = true
+		case r.Action == "reject" && agreed:
+			c.consent = append(c.consent, ConsentEvent{Action: "reject", Head: r.Hash})
+		case r.Action == "expire" && agreed:
+			c.consent = append(c.consent, ConsentEvent{Action: "expire", Head: r.Hash})
+		}
+	}
+}
+
 func (c *Contract) Execute(i Identity, action, evidence string, now time.Time) error {
 	cmd := c.Command(action, evidence)
 	return c.Apply(cmd, Sign(i, "contract", cmd), now)

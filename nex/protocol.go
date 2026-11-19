@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"sync"
+	"unicode/utf8"
 )
 
 // Protocol is an agreement/delegation language with no amount or token field.
@@ -13,6 +15,9 @@ import (
 // host supplies authoritative heights; it is not a distributed consensus engine.
 // Evidence fields commit private artifacts; a hash does not verify their truth.
 const ProtocolVersion = 1
+
+// ProtocolVersionV2 adds reviewed artifacts and explicit incomplete returns.
+const ProtocolVersionV2 = 2
 
 type ProtocolPermission string
 
@@ -58,6 +63,9 @@ type ProtocolSpec struct {
 	DissentPolicy                                        string // record | block
 	Return                                               ReturnRequirements
 	MaxEvents                                            uint32
+	// TaskID and Generation optionally bind a v2 protocol to a task lease.
+	TaskID     string `json:",omitempty"`
+	Generation uint64 `json:",omitempty"`
 }
 
 type WorkOutcome string
@@ -79,6 +87,7 @@ type WorkReport struct {
 	Evidence          []string
 	Resources         []ResourceUse
 	BreachClaims      []BreachClaim
+	Manifest          *EvidenceManifest `json:",omitempty"`
 }
 type WitnessReview struct {
 	ReportHash     string
@@ -109,6 +118,7 @@ type ProtocolCommand struct {
 	Review                                                     *WitnessReview
 	Resolution                                                 *Resolution
 	Return                                                     *ReturnManifest
+	Incomplete                                                 *IncompleteReturn `json:",omitempty"`
 }
 type ProtocolEvent struct {
 	Command     ProtocolCommand
@@ -131,6 +141,7 @@ type ProtocolView struct {
 	Reviews         []RecordedReview
 	Resolution      *Resolution
 	Return          *ReturnManifest
+	Incomplete      *IncompleteState `json:",omitempty"`
 }
 
 type Protocol struct {
@@ -181,18 +192,31 @@ func (s ProtocolSpec) validate() error {
 	if !small(s.Scope) {
 		return ErrProtocolSpec
 	}
-	if s.Version != ProtocolVersion || !small(s.Nonce) || !small(s.Purpose) || !small(s.IntendedOutcome) || !protocolHash(s.SpecificationHash) || !protocolHash(s.AcceptanceHash) || !protocolHash(s.FailurePolicyHash) || s.WorkByHeight == 0 || s.ReturnByHeight <= s.WorkByHeight || s.MaxEvents < 8 || s.MaxEvents > 1024 || len(s.Participants) < 2 || len(s.Participants) > 16 || len(s.Roles) == 0 || len(s.Roles) > 64 || len(s.Resources) > 16 {
+	v2 := s.Version == ProtocolVersionV2
+	if (s.Version != ProtocolVersion && !v2) || !small(s.Nonce) || !small(s.Purpose) || !small(s.IntendedOutcome) || !protocolHash(s.SpecificationHash) || !protocolHash(s.AcceptanceHash) || !protocolHash(s.FailurePolicyHash) || s.WorkByHeight == 0 || s.ReturnByHeight <= s.WorkByHeight || s.MaxEvents < 8 || s.MaxEvents > 1024 || len(s.Participants) < 2 || len(s.Participants) > 16 || len(s.Roles) == 0 || len(s.Roles) > 64 || len(s.Resources) > 16 {
+		return ErrProtocolSpec
+	}
+	if s.TaskID != "" || s.Generation != 0 {
+		if !v2 || !protocolHash(s.TaskID) || s.Generation == 0 {
+			return ErrProtocolSpec
+		}
+	}
+	if v2 && (s.WorkByHeight < 2 || !validV2SpecText(s)) {
 		return ErrProtocolSpec
 	}
 	if s.DissentPolicy != "record" && s.DissentPolicy != "block" {
 		return ErrProtocolSpec
 	}
 	parties := map[string]bool{}
+	signingKeys := map[string]bool{}
 	for _, p := range s.Participants {
-		if p.Validate() != nil || parties[p.ID()] {
+		if p.Validate() != nil || parties[p.ID()] || (v2 && signingKeys[string(p.Signing)]) {
 			return ErrProtocolSpec
 		}
 		parties[p.ID()] = true
+		if v2 {
+			signingKeys[string(p.Signing)] = true
+		}
 	}
 	if !parties[s.Initiator] {
 		return ErrProtocolSpec
@@ -201,12 +225,12 @@ func (s ProtocolSpec) validate() error {
 	workers := map[string]bool{}
 	reviewers := map[string]bool{}
 	deciders := map[string]bool{}
-	canCommit, canReturn := false, false
+	canCommit, canReturn, canClose := false, false, false
 	for _, g := range s.Roles {
 		if g.Scope != s.Scope {
 			return ErrProtocolSpec
 		}
-		if !small(g.ID) || ids[g.ID] || !parties[g.Actor] || !small(g.Label) || !small(g.Scope) || g.ExpiresAtHeight == 0 || g.ExpiresAtHeight > s.ReturnByHeight || !protocolHash(g.LimitsHash) || !protocolHash(g.EvidenceObligation) || len(g.Permissions) == 0 || len(g.Permissions) > 5 {
+		if !small(g.ID) || ids[g.ID] || !parties[g.Actor] || !small(g.Label) || !small(g.Scope) || g.ExpiresAtHeight == 0 || (v2 && g.ExpiresAtHeight < 2) || g.ExpiresAtHeight > s.ReturnByHeight || !protocolHash(g.LimitsHash) || !protocolHash(g.EvidenceObligation) || len(g.Permissions) == 0 || len(g.Permissions) > 5 {
 			return ErrProtocolSpec
 		}
 		ids[g.ID] = true
@@ -231,9 +255,10 @@ func (s ProtocolSpec) validate() error {
 		}
 		if hasPermission(g, PermitReturn) {
 			canReturn = true
+			canClose = canClose || g.ExpiresAtHeight == s.ReturnByHeight
 		}
 	}
-	if !canCommit || !canReturn || len(workers) == 0 || len(deciders) == 0 {
+	if !canCommit || !canReturn || (v2 && !canClose) || len(workers) == 0 || len(deciders) == 0 {
 		return ErrProtocolSpec
 	}
 	if int(s.MaxEvents) < len(s.Participants)+len(reviewers)+4 {
@@ -255,7 +280,7 @@ func (s ProtocolSpec) validate() error {
 		}
 		resources[r.Resource] = true
 	}
-	validID := func(v string) bool { return len(v) > 0 && len(v) <= 128 }
+	validID := func(v string) bool { return len(v) > 0 && len(v) <= 128 && (!v2 || utf8.ValidString(v)) }
 	if !uniqueStrings(s.Return.SuccessArtifacts, 32, validID) || !uniqueStrings(s.Return.FailureArtifacts, 32, validID) || len(s.Return.AllowedDisposition) == 0 || !uniqueStrings(s.Return.AllowedDisposition, 4, func(v string) bool { return v == "continue" || v == "retry" || v == "renegotiate" || v == "refuse" }) {
 		return ErrProtocolSpec
 	}
@@ -300,7 +325,7 @@ func protocolPermission(action string) ProtocolPermission {
 		return PermitReview
 	case "resolve", "failure":
 		return PermitDecide
-	case "return":
+	case "return", "incomplete":
 		return PermitReturn
 	}
 	return ""
@@ -325,13 +350,27 @@ func (p *Protocol) authorize(c ProtocolCommand) error {
 		return ErrProtocolAuthority
 	}
 	for _, g := range p.spec.Roles {
-		if g.ID == c.GrantID && g.Actor == c.Actor && g.Scope == c.Scope && c.Height < g.ExpiresAtHeight && hasPermission(g, permission) {
+		if g.ID != c.GrantID || g.Actor != c.Actor || g.Scope != c.Scope || !hasPermission(g, permission) {
+			continue
+		}
+		if c.Action == "incomplete" {
+			// A return grant that reaches the deadline includes administrative
+			// closeout after it. This never extends authority for a normal return.
+			if p.spec.Version == ProtocolVersionV2 && c.Height >= p.spec.ReturnByHeight && g.ExpiresAtHeight == p.spec.ReturnByHeight && slices.Contains(p.view.Admitted, c.Actor) {
+				return nil
+			}
+			return ErrProtocolAuthority
+		}
+		if c.Height < g.ExpiresAtHeight {
 			return nil
 		}
 	}
 	return ErrProtocolAuthority
 }
 func validateReport(r WorkReport, s ProtocolSpec) error {
+	if err := validateReportManifest(r, s); err != nil {
+		return err
+	}
 	switch r.Outcome {
 	case WorkCompleted, WorkAttempted, WorkRejected, WorkFailedSafely, WorkViolated, WorkSpecDefect, WorkUnreported:
 	default:
@@ -401,6 +440,11 @@ func validateReturn(m ReturnManifest, v ProtocolView, s ProtocolSpec) error {
 			return ErrProtocolEvidence
 		}
 	}
+	if s.Version == ProtocolVersionV2 && v.Resolution.Outcome == "accept" {
+		if err := validateReturnedOutputs(m, v.Report.Manifest); err != nil {
+			return err
+		}
+	}
 	allowed := false
 	for _, d := range s.Return.AllowedDisposition {
 		if d == m.Disposition {
@@ -420,7 +464,7 @@ func commandShape(c ProtocolCommand) bool {
 		return false
 	}
 	n := 0
-	for _, b := range []bool{c.Report != nil, c.Review != nil, c.Resolution != nil, c.Return != nil} {
+	for _, b := range []bool{c.Report != nil, c.Review != nil, c.Resolution != nil, c.Return != nil, c.Incomplete != nil} {
 		if b {
 			n++
 		}
@@ -436,6 +480,8 @@ func commandShape(c ProtocolCommand) bool {
 		return n == 1 && c.Resolution != nil
 	case "return":
 		return n == 1 && c.Return != nil
+	case "incomplete":
+		return n == 1 && c.Incomplete != nil
 	}
 	return false
 }
@@ -476,10 +522,10 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 	if uint32(len(p.events)) >= p.spec.MaxEvents {
 		return "", ErrProtocolPhase
 	}
-	if p.view.Phase == "complete" {
+	if p.view.Phase == "complete" || p.view.Phase == "incomplete" {
 		return "", ErrProtocolPhase
 	}
-	if height >= p.spec.ReturnByHeight {
+	if height >= p.spec.ReturnByHeight && c.Action != "incomplete" {
 		return "", ErrProtocolAuthority
 	}
 	v := cloneProtocol(p.view)
@@ -561,6 +607,12 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 		}
 		v.Return = c.Return
 		v.Phase = "complete"
+	case "incomplete":
+		if err := c.Incomplete.validate(); err != nil {
+			return "", err
+		}
+		v.Incomplete = incompleteState(*c.Incomplete, v, p.spec)
+		v.Phase = "incomplete"
 	default:
 		return "", ErrProtocolPhase
 	}
@@ -580,26 +632,33 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 // VerifyProtocolBundle replays signatures, admission, authority, evidence,
 // dissent and return requirements. Pins prevent substitution and truncation.
 func VerifyProtocolBundle(b ProtocolBundle, expectedID, expectedHead string) (ProtocolView, error) {
-	p, err := NewProtocol(b.Spec)
+	p, err := replayProtocolBundle(b, expectedID, expectedHead)
 	if err != nil {
 		return ProtocolView{}, err
 	}
+	return p.View(), nil
+}
+
+func replayProtocolBundle(b ProtocolBundle, expectedID, expectedHead string) (*Protocol, error) {
+	p, err := NewProtocol(b.Spec)
+	if err != nil {
+		return nil, err
+	}
 	if p.view.ID != expectedID || len(b.Events) > int(b.Spec.MaxEvents) {
-		return ProtocolView{}, ErrProtocolStale
+		return nil, ErrProtocolStale
 	}
 	for _, e := range b.Events {
 		before := len(p.events)
 		head, err := p.Apply(e.Command, e.Signature, e.Command.Height)
 		if err != nil {
-			return ProtocolView{}, err
+			return nil, err
 		}
 		if head != e.ReceiptHash || len(p.events) != before+1 {
-			return ProtocolView{}, ErrProtocolStale
+			return nil, ErrProtocolStale
 		}
 	}
-	view := p.View()
-	if view.Head != expectedHead {
-		return ProtocolView{}, ErrProtocolStale
+	if p.view.Head != expectedHead {
+		return nil, ErrProtocolStale
 	}
-	return view, nil
+	return p, nil
 }

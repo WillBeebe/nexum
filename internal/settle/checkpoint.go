@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math/big"
 
-	"github.com/WillBeebe/nexum/internal/he"
+	"github.com/WillBeebe/nexum/v2/internal/he"
 )
 
 // PrivateState contains secrets. Persist only inside an authenticated encrypted

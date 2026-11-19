@@ -2,11 +2,12 @@ package settle
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math/big"
 
-	"github.com/WillBeebe/nexum/internal/he"
+	"github.com/WillBeebe/nexum/v2/internal/he"
 )
 
 // EncryptedLedger holds local Paillier keys and encryption randomness. It
@@ -134,6 +135,56 @@ func (l *EncryptedLedger) ProveEqual(sealedSum []byte, committed int64) ([]byte,
 // scratch so a replayed proof for different values fails.
 func (l *EncryptedLedger) VerifyEqual(sealedSum []byte, committed int64, proof []byte) (bool, error) {
 	return l.p.VerifyEqual(sealedSum, big.NewInt(committed), proof)
+}
+
+// PublicModulus is the Paillier public key. It contains no secret factor.
+func (l *EncryptedLedger) PublicModulus() []byte {
+	if l == nil || l.p == nil {
+		return nil
+	}
+	return l.p.N().Bytes()
+}
+
+// VerifyPublic checks group membership, the homomorphic aggregate and the
+// public equality proof. It does not require Paillier private factors or
+// encryption randomness.
+func VerifyPublic(public []byte, ciphertexts [][]byte, aggregate []byte, amount int64, proof []byte) error {
+	if amount <= 0 {
+		return ErrBadLock
+	}
+	if len(ciphertexts) == 0 || len(ciphertexts) > 128 || len(aggregate) == 0 || len(aggregate) > 8192 || len(proof) == 0 || len(proof) > 8192 {
+		return ErrSumMismatch
+	}
+	p, err := he.FromPublic(public)
+	if err != nil {
+		return err
+	}
+	for _, ct := range ciphertexts {
+		if len(ct) == 0 || len(ct) > 8192 {
+			return ErrSumMismatch
+		}
+		if _, err = p.Add(ct, ct); err != nil {
+			return err
+		}
+	}
+	sum := append([]byte(nil), ciphertexts[0]...)
+	for _, ct := range ciphertexts[1:] {
+		sum, err = p.Add(sum, ct)
+		if err != nil {
+			return err
+		}
+	}
+	if subtle.ConstantTimeCompare(sum, aggregate) != 1 {
+		return ErrSumMismatch
+	}
+	ok, err := p.VerifyEqual(aggregate, big.NewInt(amount), proof)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrSumMismatch
+	}
+	return nil
 }
 
 // Clone isolates mutable encryption randomness for a staged lock.

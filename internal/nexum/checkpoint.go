@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/WillBeebe/nexum/internal/settle"
+	"github.com/WillBeebe/nexum/v2/internal/settle"
 )
 
 // PrivateCheckpoint includes local custody secrets. It must only be persisted
@@ -49,6 +49,23 @@ func RestorePrivate(s PrivateCheckpoint) (*Agreement, error) {
 	if err = a.VerifyReceipts(); err != nil {
 		return nil, bad
 	}
+	if a.Format != 0 && a.Format != 1 && a.Format != FormatV2 {
+		return nil, bad
+	}
+	if a.Format >= FormatV2 && a.Mode != ModePlaintext && a.Mode != ModeSealed {
+		return nil, bad
+	}
+	seals := 0
+	for _, r := range a.Receipts {
+		if r.Action == "seal" {
+			seals++
+		}
+	}
+	if seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || a.Mode == ModeSealed {
+		if err = a.sealsMatchReceipts(); err != nil {
+			return nil, bad
+		}
+	}
 	a.steps = s.Steps
 	switch a.Status {
 	case StatusOpen:
@@ -74,12 +91,25 @@ func RestorePrivate(s PrivateCheckpoint) (*Agreement, error) {
 	default:
 		return nil, bad
 	}
+	if a.Mode == ModePlaintext && (s.Ledger != nil || seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0) {
+		return nil, bad
+	}
 	if s.Ledger != nil {
-		if len(s.Ledger.Randomness) != len(a.SealedLocks) {
+		if a.Mode == ModePlaintext || len(s.Ledger.Randomness) != len(a.SealedLocks) || seals != len(a.SealedLocks) {
 			return nil, bad
 		}
 		a.Sealed, err = settle.RestorePrivate(*s.Ledger)
 		if err != nil {
+			return nil, bad
+		}
+		if len(a.PublicKey) == 0 {
+			a.PublicKey = a.Sealed.PublicModulus()
+		} else if !bytes.Equal(a.PublicKey, a.Sealed.PublicModulus()) {
+			return nil, bad
+		}
+		if a.Scheme == "" {
+			a.Scheme = SchemePaillier
+		} else if a.Scheme != SchemePaillier {
 			return nil, bad
 		}
 		if len(a.SealedLocks) > 0 {
@@ -94,10 +124,16 @@ func RestorePrivate(s PrivateCheckpoint) (*Agreement, error) {
 			} else if !bytes.Equal(sum, a.SealedSum) {
 				return nil, bad
 			}
-		} else if len(a.SealedSum) != 0 {
+			if len(a.SealedAggregate) > 0 && !bytes.Equal(a.SealedAggregate, sum) {
+				return nil, bad
+			}
+			// Legacy accepted snapshots clear SealedSum. Keep the recomputed
+			// aggregate for the public proof bundle.
+			a.SealedAggregate = append([]byte(nil), sum...)
+		} else if len(a.SealedSum) != 0 || len(a.SealedAggregate) != 0 {
 			return nil, bad
 		}
-	} else if len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 {
+	} else if seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 || a.Mode == ModeSealed {
 		return nil, bad
 	}
 	return &a, nil

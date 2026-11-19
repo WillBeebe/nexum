@@ -1,9 +1,9 @@
 # Using Nexum from Go
 
-Nexum v0.3.0 is one Go module under Apache-2.0. Its client package is `nex`:
+Nexum v2.0.0 is one Go module under Apache-2.0. Its client package is `nex`:
 
 ```go
-import "github.com/WillBeebe/nexum/nex"
+import "github.com/WillBeebe/nexum/v2/nex"
 ```
 
 Requires Go 1.25 or newer. No Comlink server, GPU, model account or private
@@ -15,7 +15,7 @@ normal Go proxy and checksum verification apply.
 Inside your own Go module:
 
 ```sh
-go get github.com/WillBeebe/nexum/nex@v0.3.0
+go get github.com/WillBeebe/nexum/v2/nex@v2.0.0
 ```
 
 Commit your application's go.mod and go.sum. Keep the version pinned for
@@ -24,7 +24,7 @@ reproducible builds. Nexum and nex do not require separate library downloads.
 ## Install the command
 
 ```sh
-go install github.com/WillBeebe/nexum/cmd/nex@v0.3.0
+go install github.com/WillBeebe/nexum/v2/cmd/nex@v2.0.0
 nex demo
 ```
 
@@ -37,7 +37,7 @@ manager. Applications use the Go API for integrations.
 For a local clean Nexum checkout, use a temporary application replacement:
 
 ```sh
-go mod edit -replace=github.com/WillBeebe/nexum=/absolute/path/to/nexum
+go mod edit -replace=github.com/WillBeebe/nexum/v2=/absolute/path/to/nexum
 go mod tidy
 ```
 

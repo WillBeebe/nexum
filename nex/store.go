@@ -12,10 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"github.com/WillBeebe/nexum/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
 )
 
 var (
@@ -72,6 +73,21 @@ type storedContract struct {
 	Operations    map[string]committedOperation
 }
 
+// StoreStats records actual OS lock, encrypted-checkpoint I/O, AEAD authentication,
+// replay/checkpoint validation, cache reuse, and directory durability sync work.
+type StoreStats struct {
+	LockAcquisitions    int64
+	LockWaitNanos       int64
+	CheckpointReads     int64
+	AuthDecryptOps      int64
+	ReplayValidationOps int64
+	CacheHits           int64
+	CacheMisses         int64
+	CheckpointWrites    int64
+	DirSyncOps          int64
+	DirSyncNanos        int64
+}
+
 // Store persists encrypted contract checkpoints on a local filesystem. Separate
 // handles and processes serialize each contract through an OS file lock. It is
 // not a distributed store; do not use network filesystems or delete lock files.
@@ -82,6 +98,36 @@ type Store struct {
 	aead cipher.AEAD
 	// Tests inject crashes/failures at actual persistence boundaries.
 	commitHook func(string) error
+
+	lockAcquisitions    atomic.Int64
+	lockWaitNanos       atomic.Int64
+	checkpointReads     atomic.Int64
+	authDecryptOps      atomic.Int64
+	replayValidationOps atomic.Int64
+	cacheHits           atomic.Int64
+	cacheMisses         atomic.Int64
+	checkpointWrites    atomic.Int64
+	dirSyncOps          atomic.Int64
+	dirSyncNanos        atomic.Int64
+}
+
+// Stats returns a snapshot of actual lock, read, AEAD decrypt, validation, cache, and sync counts.
+func (s *Store) Stats() StoreStats {
+	if s == nil {
+		return StoreStats{}
+	}
+	return StoreStats{
+		LockAcquisitions:    s.lockAcquisitions.Load(),
+		LockWaitNanos:       s.lockWaitNanos.Load(),
+		CheckpointReads:     s.checkpointReads.Load(),
+		AuthDecryptOps:      s.authDecryptOps.Load(),
+		ReplayValidationOps: s.replayValidationOps.Load(),
+		CacheHits:           s.cacheHits.Load(),
+		CacheMisses:         s.cacheMisses.Load(),
+		CheckpointWrites:    s.checkpointWrites.Load(),
+		DirSyncOps:          s.dirSyncOps.Load(),
+		DirSyncNanos:        s.dirSyncNanos.Load(),
+	}
 }
 
 // OpenStore opens or creates one private directory (its parent must exist).
@@ -106,9 +152,11 @@ func OpenStore(dir string, key []byte) (*Store, error) {
 		return nil, errors.New("nex: store directory must be private (0700), without a symlink")
 	}
 	// Persist directory creation before acknowledging any contracts within it.
+	syncStart := time.Now()
 	if err = syncDirectory(filepath.Dir(absolute)); err != nil {
 		return nil, err
 	}
+	initSyncNanos := time.Since(syncStart).Nanoseconds()
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -117,7 +165,10 @@ func OpenStore(dir string, key []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{dir: absolute, aead: aead}, nil
+	st := &Store{dir: absolute, aead: aead}
+	st.dirSyncOps.Add(1)
+	st.dirSyncNanos.Add(initSyncNanos)
+	return st, nil
 }
 
 // Create stores a newly constructed, unused Contract. It copies the definition
@@ -151,7 +202,7 @@ func (s *Store) View(id string) (ContractState, error) {
 		}
 		// Confirm durability when recovering a replacement whose writer exited
 		// before its final directory sync, including uncertain creation.
-		if err = syncDirectory(s.dir); err != nil {
+		if err = s.syncDir(); err != nil {
 			return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 		}
 		view = ContractState{ID: id, Terms: record.Terms, Head: c.Head(), Status: c.Status(), Agreed: c.agreed, Receipts: c.agreement.Receipts}
@@ -200,7 +251,7 @@ func (s *Store) Apply(id string, op Operation, signature []byte, now time.Time) 
 				return ErrOperationConflict
 			}
 			// Also resolves a previous rename followed by an uncertain directory sync.
-			if err = syncDirectory(s.dir); err != nil {
+			if err = s.syncDir(); err != nil {
 				return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 			}
 			result = prior.Result
@@ -240,9 +291,12 @@ func (s *Store) withLock(id string, fn func() error) error {
 		return err
 	}
 	defer f.Close() // OS releases the lock on close and process death.
+	waitStart := time.Now()
 	if err = lockStoreFile(f); err != nil {
 		return err
 	}
+	s.lockWaitNanos.Add(time.Since(waitStart).Nanoseconds())
+	s.lockAcquisitions.Add(1)
 	return fn()
 }
 
@@ -259,6 +313,7 @@ func (s *Store) readEncrypted(id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.checkpointReads.Add(1)
 	n := s.aead.NonceSize()
 	if len(data) > maxCheckpoint || len(data) < len(storeHeader)+n+s.aead.Overhead() {
 		return nil, ErrCorruptStore
@@ -267,6 +322,7 @@ func (s *Store) readEncrypted(id string) ([]byte, error) {
 		return nil, ErrStoreVersion
 	}
 	nonce := data[len(storeHeader) : len(storeHeader)+n]
+	s.authDecryptOps.Add(1)
 	plain, err := s.aead.Open(nil, nonce, data[len(storeHeader)+n:], []byte(storeHeader+"/"+id))
 	if err != nil {
 		return nil, ErrCorruptStore
@@ -280,6 +336,7 @@ func (s *Store) read(id string) (storedContract, *Contract, error) {
 	if err != nil {
 		return record, nil, err
 	}
+	s.replayValidationOps.Add(1)
 	if err = json.Unmarshal(plain, &record); err != nil {
 		return record, nil, ErrCorruptStore
 	}
@@ -304,6 +361,7 @@ func (r *storedContract) restore(id string) (*Contract, error) {
 		return nil, ErrCorruptStore
 	}
 	c := &Contract{agreement: a, terms: id, buyer: r.Buyer, seller: r.Seller, agreed: r.Agreed, definition: r.Terms}
+	c.rebuildConsent()
 	// Every committed operation must account for exactly its contiguous receipts.
 	// This checks the success index and consent/state against the checkpoint,
 	// rather than trusting a deserialized flag or cached result independently.
@@ -422,16 +480,25 @@ func (s *Store) write(id string, record any) error {
 	if err = os.Rename(name, s.path(id)); err != nil {
 		return err
 	}
+	s.checkpointWrites.Add(1)
 	if err = s.hook("after-rename"); err != nil {
 		return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 	}
-	if err = syncDirectory(s.dir); err != nil {
+	if err = s.syncDir(); err != nil {
 		return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 	}
 	if err = s.hook("after-sync"); err != nil {
 		return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 	}
 	return nil
+}
+
+func (s *Store) syncDir() error {
+	start := time.Now()
+	err := syncDirectory(s.dir)
+	s.dirSyncNanos.Add(time.Since(start).Nanoseconds())
+	s.dirSyncOps.Add(1)
+	return err
 }
 
 func syncDirectory(path string) error {

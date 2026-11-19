@@ -2,25 +2,51 @@ package adapter
 
 import (
 	"bytes"
+	"errors"
+	"sync"
 	"time"
 
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
+// DefaultHistory is the retained-row bound per tenant. Admission fails when
+// it is reached. Rows are not deleted to free a pending slot.
+const DefaultHistory = 1024
+
 type itemRecord struct {
-	Version  int
-	Item     OutboundItem
-	Status   string
-	Original *AuthenticatedResponse
-	NextTry  time.Time
-	Attempts int
+	Version   int
+	Item      OutboundItem
+	Status    string
+	Original  *AuthenticatedResponse
+	Candidate *AuthenticatedResponse
+	NextTry   time.Time
+	Attempts  int
+	// VerifiedSignature and Authority are written by RecordVerified.
+	// Both empty means the row has local vault provenance only.
+	VerifiedSignature []byte
+	Authority         nex.Public
+}
+
+const (
+	admissionGateFile = "admission.gate"
+	admissionGateAAD  = vaultHeader + "/admission.gate/v1"
+)
+
+type admissionGateRecord struct {
+	Version    int    `json:"version"`
+	Stopped    bool   `json:"stopped"`
+	Generation uint64 `json:"generation"`
 }
 
 // Outbox retains exact signed commands until a verified result is recorded.
 type Outbox struct {
-	vault   *vault
-	Quota   int
-	now     func() time.Time
+	vault        *vault
+	Quota        int
+	HistoryLimit int
+	now          func() time.Time
+	// mu guards the in-process stopped latch; admission.gate persists the
+	// admission gate across processes sharing or copying the vault directory.
+	mu      sync.Mutex
 	stopped bool
 }
 
@@ -38,7 +64,126 @@ func (o *Outbox) SetNow(now func() time.Time) {
 	}
 }
 
-func (o *Outbox) StopAdmission() { o.stopped = true }
+func (o *Outbox) setStopped(stopped bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stopped = stopped
+}
+
+func (o *Outbox) StopAdmission() {
+	if o == nil {
+		return
+	}
+	o.setStopped(true)
+	if o.vault == nil {
+		return
+	}
+	_ = o.vault.withLock(func() error {
+		gate, err := o.readAdmissionGateLocked()
+		if err != nil {
+			return err
+		}
+		gate.Stopped = true
+		return o.writeAdmissionGateLocked(gate)
+	})
+}
+
+// SealAdmission durably stops new Enqueue calls at the given fence generation.
+// Any process opening or copying this vault observes ErrAdmissionStopped on
+// Enqueue until ResumeAdmission succeeds at or above generation.
+func (o *Outbox) SealAdmission(generation uint64) error {
+	if o == nil || o.vault == nil {
+		return ErrItem
+	}
+	o.setStopped(true)
+	return o.vault.withLock(func() error {
+		gate, err := o.readAdmissionGateLocked()
+		if err != nil {
+			return err
+		}
+		if generation < gate.Generation {
+			return ErrActivation
+		}
+		gate.Stopped = true
+		gate.Generation = generation
+		return o.writeAdmissionGateLocked(gate)
+	})
+}
+
+// ResumeAdmission reopens admission at generation, refusing any generation
+// older than the durable gate generation.
+func (o *Outbox) ResumeAdmission(generation uint64) error {
+	if o == nil || o.vault == nil {
+		return ErrItem
+	}
+	return o.vault.withLock(func() error {
+		gate, err := o.readAdmissionGateLocked()
+		if err != nil {
+			return err
+		}
+		if generation < gate.Generation {
+			return ErrActivation
+		}
+		gate.Stopped = false
+		gate.Generation = generation
+		if err := o.writeAdmissionGateLocked(gate); err != nil {
+			return err
+		}
+		o.setStopped(false)
+		return nil
+	})
+}
+
+// AdmissionSealed reports whether admission is stopped and the persisted gate
+// generation recorded in admission.gate.
+func (o *Outbox) AdmissionSealed() (bool, uint64, error) {
+	if o == nil || o.vault == nil {
+		return true, 0, ErrItem
+	}
+	var (
+		sealed bool
+		gen    uint64
+	)
+	err := o.vault.withLock(func() error {
+		gate, err := o.readAdmissionGateLocked()
+		if err != nil {
+			return err
+		}
+		sealed = o.admissionStopped() || gate.Stopped
+		gen = gate.Generation
+		return nil
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	return sealed, gen, nil
+}
+
+func (o *Outbox) readAdmissionGateLocked() (admissionGateRecord, error) {
+	var gate admissionGateRecord
+	err := o.vault.readNamed(admissionGateFile, admissionGateAAD, &gate)
+	if errors.Is(err, ErrNotFound) {
+		return admissionGateRecord{Version: Version}, nil
+	}
+	if err != nil {
+		return admissionGateRecord{}, err
+	}
+	if gate.Version != Version {
+		return admissionGateRecord{}, ErrVersion
+	}
+	return gate, nil
+}
+
+func (o *Outbox) writeAdmissionGateLocked(gate admissionGateRecord) error {
+	gate.Version = Version
+	return o.vault.writeNamed(admissionGateFile, admissionGateAAD, gate)
+}
+
+func (o *Outbox) admissionStopped() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.stopped
+}
 
 func (o *Outbox) Enqueue(item OutboundItem) error {
 	if err := validateItem(item); err != nil {
@@ -47,11 +192,18 @@ func (o *Outbox) Enqueue(item OutboundItem) error {
 	item.Retry = item.Retry.normalized()
 	id := recordID(item.Tenant, item.OperationID)
 	return o.vault.withLock(func() error {
-		if o.stopped {
+		if o.admissionStopped() {
+			return ErrAdmissionStopped
+		}
+		gate, err := o.readAdmissionGateLocked()
+		if err != nil {
+			return err
+		}
+		if gate.Stopped {
 			return ErrAdmissionStopped
 		}
 		var existing itemRecord
-		err := o.vault.read(id, &existing)
+		err = o.vault.read(id, &existing)
 		if err == nil {
 			if existing.Item.Tenant != item.Tenant {
 				return ErrTenant
@@ -65,6 +217,9 @@ func (o *Outbox) Enqueue(item OutboundItem) error {
 			return err
 		}
 		if err = o.enforceQuota(item.Tenant); err != nil {
+			return err
+		}
+		if err = o.enforceHistory(item.Tenant); err != nil {
 			return err
 		}
 		return o.vault.write(id, itemRecord{Version: Version, Item: item, Status: StatusPending})
@@ -82,6 +237,9 @@ func (o *Outbox) Get(tenant, operationID string) (RecordedItem, error) {
 	err := o.vault.withLock(func() error {
 		var stored itemRecord
 		if err := o.vault.read(recordID(tenant, operationID), &stored); err != nil {
+			return err
+		}
+		if err := validateStored(stored); err != nil {
 			return err
 		}
 		if stored.Item.Tenant != tenant {
@@ -109,7 +267,10 @@ func (o *Outbox) Due(tenant string) ([]RecordedItem, error) {
 			if err = o.vault.read(id, &stored); err != nil {
 				return err
 			}
-			if stored.Item.Tenant != tenant || stored.Status == StatusResolved {
+			if err = validateStored(stored); err != nil {
+				return err
+			}
+			if stored.Item.Tenant != tenant || terminalOutbox(stored.Status) {
 				continue
 			}
 			if !stored.NextTry.IsZero() && now.Before(stored.NextTry) {
@@ -137,6 +298,9 @@ func (o *Outbox) Unresolved(tenant string) ([]RecordedItem, error) {
 			if err = o.vault.read(id, &stored); err != nil {
 				return err
 			}
+			if err = validateStored(stored); err != nil {
+				return err
+			}
 			if stored.Item.Tenant != tenant || stored.Status == StatusResolved {
 				continue
 			}
@@ -154,7 +318,10 @@ func (o *Outbox) ReconcileDue(tenant, operationID string, auth Authority) (Authe
 	if err != nil {
 		return AuthenticatedResponse{}, err
 	}
-	if rec.Status != StatusResolved && !rec.NextTry.IsZero() && o.now().Before(rec.NextTry) {
+	if terminalOutbox(rec.Status) {
+		return o.Reconcile(tenant, operationID, auth)
+	}
+	if !rec.NextTry.IsZero() && o.now().Before(rec.NextTry) {
 		return AuthenticatedResponse{}, ErrNotDue
 	}
 	return o.Reconcile(tenant, operationID, auth)
@@ -175,6 +342,9 @@ func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (Authenti
 		if err := o.vault.read(id, &stored); err != nil {
 			return err
 		}
+		if err := validateStored(stored); err != nil {
+			return err
+		}
 		if stored.Item.Tenant != tenant {
 			return ErrTenant
 		}
@@ -182,19 +352,35 @@ func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (Authenti
 			resp = *stored.Original
 			return nil
 		}
+		if stored.Status == StatusConflict {
+			return ErrConflict
+		}
+		if stored.Status == StatusRefused {
+			if stored.Original != nil {
+				resp = *stored.Original
+			}
+			return ErrDefinitive
+		}
 		got, err := auth.Apply(stored.Item)
 		stored.Attempts++
 		stored.NextTry = o.now().Add(backoff(stored.Item.Retry, stored.Attempts))
 		if err != nil {
 			stored.Status = statusFor(got, err)
+			if terminalOutbox(stored.Status) {
+				copy := got
+				stored.Original = &copy
+				stored.Candidate = nil
+				stored.NextTry = time.Time{}
+			}
 			if writeErr := o.vault.write(id, stored); writeErr != nil {
 				return writeErr
 			}
 			resp = got
 			return err
 		}
-		if got.Kind == ResultUncertain {
+		if got.Kind == ResultUncertain || got.Kind == ResultRefused {
 			stored.Status = StatusUnknown
+			stored.Candidate = nil
 			if writeErr := o.vault.write(id, stored); writeErr != nil {
 				return writeErr
 			}
@@ -202,22 +388,20 @@ func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (Authenti
 			return ErrUnresolved
 		}
 		if got.Kind == ResultConflict {
+			copy := got
+			stored.Original = &copy
+			stored.Candidate = nil
 			stored.Status = StatusConflict
+			stored.NextTry = time.Time{}
 			if writeErr := o.vault.write(id, stored); writeErr != nil {
 				return writeErr
 			}
 			resp = got
 			return ErrConflict
 		}
-		if got.Kind == ResultRefused {
-			stored.Status = StatusUnknown
-			if writeErr := o.vault.write(id, stored); writeErr != nil {
-				return writeErr
-			}
-			resp = got
-			return ErrUnresolved
-		}
-		stored.Status = StatusUnknown
+		copy := got
+		stored.Candidate = &copy
+		stored.Status = StatusAwaiting
 		if writeErr := o.vault.write(id, stored); writeErr != nil {
 			return writeErr
 		}
@@ -241,6 +425,9 @@ func (o *Outbox) RecordVerified(tenant, operationID string, resp AuthenticatedRe
 		if err := o.vault.read(id, &stored); err != nil {
 			return err
 		}
+		if err := validateStored(stored); err != nil {
+			return err
+		}
 		if stored.Item.Tenant != tenant || resp.Tenant != tenant {
 			return ErrTenant
 		}
@@ -250,15 +437,34 @@ func (o *Outbox) RecordVerified(tenant, operationID string, resp AuthenticatedRe
 		if resp.CommandHash != CommandHash(stored.Item.SignedObject) {
 			return ErrForeign
 		}
-		if resp.Version != Version || resp.Kind != ResultAgreement {
+		if resp.Error != "" || resp.Version != Version || resp.Kind != ResultAgreement {
+			return ErrResponse
+		}
+		if !responseMatchesKind(stored.Item.Kind, resp) {
 			return ErrResponse
 		}
 		if err := VerifyResponse(authority, resp, signature); err != nil {
 			return ErrResponse
 		}
+		if stored.Candidate != nil && !sameTerminal(*stored.Candidate, resp) {
+			return ErrConflict
+		}
+		if stored.Status == StatusResolved && stored.Original != nil {
+			if sameTerminal(*stored.Original, resp) {
+				return nil
+			}
+			return ErrConflict
+		}
+		if stored.Status == StatusConflict || stored.Status == StatusRefused {
+			return ErrConflict
+		}
 		copy := resp
 		stored.Original = &copy
+		stored.Candidate = nil
 		stored.Status = StatusResolved
+		stored.NextTry = time.Time{}
+		stored.VerifiedSignature = append([]byte(nil), signature...)
+		stored.Authority = authority
 		return o.vault.write(id, stored)
 	})
 }
@@ -278,7 +484,38 @@ func (o *Outbox) enforceQuota(tenant string) error {
 		if err = o.vault.read(id, &stored); err != nil {
 			return err
 		}
-		if stored.Item.Tenant == tenant && stored.Status != StatusResolved {
+		if err = validateStored(stored); err != nil {
+			return err
+		}
+		if stored.Item.Tenant == tenant && !terminalOutbox(stored.Status) {
+			n++
+		}
+	}
+	if n >= limit {
+		return ErrQuota
+	}
+	return nil
+}
+
+func (o *Outbox) enforceHistory(tenant string) error {
+	limit := o.HistoryLimit
+	if limit <= 0 {
+		limit = DefaultHistory
+	}
+	ids, err := o.vault.listIDs()
+	if err != nil {
+		return err
+	}
+	n := 0
+	for _, id := range ids {
+		var stored itemRecord
+		if err = o.vault.read(id, &stored); err != nil {
+			return err
+		}
+		if err = validateStored(stored); err != nil {
+			return err
+		}
+		if stored.Item.Tenant == tenant {
 			n++
 		}
 	}
@@ -313,13 +550,77 @@ func validateItem(item OutboundItem) error {
 	return nil
 }
 
+func terminalOutbox(status string) bool {
+	return status == StatusResolved || status == StatusConflict || status == StatusRefused
+}
+
+func validateStored(stored itemRecord) error {
+	if stored.Version != Version {
+		return ErrVersion
+	}
+	if err := validateItem(stored.Item); err != nil {
+		return err
+	}
+	switch stored.Status {
+	case StatusPending, StatusUnknown, StatusAwaiting, StatusResolved, StatusConflict, StatusRefused:
+	default:
+		return ErrCorrupt
+	}
+	if stored.Status == StatusResolved && (stored.Original == nil || stored.Original.Error != "") {
+		return ErrCorrupt
+	}
+	if stored.Status == StatusResolved {
+		signed := len(stored.VerifiedSignature) > 0
+		identified := len(stored.Authority.Signing) > 0
+		if signed != identified {
+			return ErrCorrupt
+		}
+		if signed {
+			if err := VerifyResponse(stored.Authority, *stored.Original, stored.VerifiedSignature); err != nil {
+				return ErrCorrupt
+			}
+		}
+	}
+	if stored.Status == StatusAwaiting && stored.Candidate != nil && stored.Candidate.Error != "" {
+		return ErrCorrupt
+	}
+	return nil
+}
+
+func responseMatchesKind(kind Kind, resp AuthenticatedResponse) bool {
+	switch kind {
+	case KindAgreement:
+		return resp.Result != nil && resp.Result.Head != "" && resp.Result.Head == resp.ReceiptHead
+	case KindProtocol:
+		return resp.Result == nil && resp.ReceiptHead != ""
+	default:
+		return false
+	}
+}
+
+func sameTerminal(a, b AuthenticatedResponse) bool {
+	if a.Kind != b.Kind || a.ReceiptHead != b.ReceiptHead || a.RequestID != b.RequestID || a.AgreementID != b.AgreementID || a.Error != b.Error {
+		return false
+	}
+	if (a.Result == nil) != (b.Result == nil) {
+		return false
+	}
+	if a.Result != nil && *a.Result != *b.Result {
+		return false
+	}
+	return true
+}
+
 func recorded(s itemRecord) RecordedItem {
 	return RecordedItem{Item: s.Item, Status: s.Status, Original: s.Original, NextTry: s.NextTry, Attempts: s.Attempts}
 }
 
 func statusFor(got AuthenticatedResponse, err error) string {
-	if got.Kind == ResultConflict || err == ErrConflict {
+	if got.Kind == ResultConflict || err == ErrConflict || errors.Is(err, nex.ErrOperationConflict) {
 		return StatusConflict
+	}
+	if got.Kind == ResultRefused && got.Definitive {
+		return StatusRefused
 	}
 	return StatusUnknown
 }

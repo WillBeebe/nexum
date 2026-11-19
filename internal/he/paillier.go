@@ -71,13 +71,33 @@ func lcm(a, b *big.Int) *big.Int {
 	return new(big.Int).Div(new(big.Int).Mul(a, b), g)
 }
 
+// unit checks membership in the multiplicative group, not just its range.
+// The equality proof relies on cancellation in this group. Nonunits can make
+// both sides of its equation zero without proving anything about a message.
+func unit(value, modulus *big.Int) bool {
+	return value != nil && value.Sign() > 0 && value.Cmp(modulus) < 0 &&
+		new(big.Int).GCD(nil, nil, value, modulus).Cmp(big.NewInt(1)) == 0
+}
+
+func randomUnit(modulus *big.Int) (*big.Int, error) {
+	for {
+		value, err := rand.Int(rand.Reader, modulus)
+		if err != nil {
+			return nil, err
+		}
+		if unit(value, modulus) {
+			return value, nil
+		}
+	}
+}
+
 // Encrypt m (0 <= m < n) to a ciphertext in Z_{n^2}*.
 func (p *Paillier) Encrypt(m *big.Int) ([]byte, error) {
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
 		return nil, ErrEnc
 	}
-	r, err := rand.Int(rand.Reader, p.n) // r in [0,n)
-	if err != nil || r.Sign() == 0 {
+	r, err := randomUnit(p.n)
+	if err != nil {
 		return nil, ErrEnc
 	}
 	// c = g^m * r^n mod n^2
@@ -92,7 +112,7 @@ func (p *Paillier) Encrypt(m *big.Int) ([]byte, error) {
 func (p *Paillier) Add(a, b []byte) ([]byte, error) {
 	ca := new(big.Int).SetBytes(a)
 	cb := new(big.Int).SetBytes(b)
-	if ca.Sign() <= 0 || cb.Sign() <= 0 || ca.Cmp(p.n2) >= 0 || cb.Cmp(p.n2) >= 0 {
+	if !unit(ca, p.n2) || !unit(cb, p.n2) {
 		return nil, ErrAdd
 	}
 	out := new(big.Int).Mul(ca, cb)
@@ -102,8 +122,11 @@ func (p *Paillier) Add(a, b []byte) ([]byte, error) {
 
 // Decrypt a ciphertext back to plaintext.
 func (p *Paillier) Decrypt(c []byte) (*big.Int, error) {
+	if p == nil || p.lambda == nil || p.mu == nil {
+		return nil, ErrDec
+	}
 	ct := new(big.Int).SetBytes(c)
-	if ct.Sign() <= 0 || ct.Cmp(p.n2) >= 0 {
+	if !unit(ct, p.n2) {
 		return nil, ErrDec
 	}
 	x := new(big.Int).Exp(ct, p.lambda, p.n2)
@@ -111,6 +134,18 @@ func (p *Paillier) Decrypt(c []byte) (*big.Int, error) {
 	m := new(big.Int).Mul(L, p.mu)
 	m.Mod(m, p.n)
 	return m, nil
+}
+
+// FromPublic builds a verification-only key. Decrypt and proving are unavailable.
+func FromPublic(modulus []byte) (*Paillier, error) {
+	if len(modulus) < 128 || len(modulus) > 1024 {
+		return nil, errors.New("he: invalid public modulus")
+	}
+	n := new(big.Int).SetBytes(modulus)
+	if n.BitLen() < 1024 || n.Bit(0) == 0 {
+		return nil, errors.New("he: invalid public modulus")
+	}
+	return &Paillier{n: n, n2: new(big.Int).Mul(n, n), g: new(big.Int).Add(n, big.NewInt(1))}, nil
 }
 
 // Scheme implements Eval.
@@ -139,12 +174,9 @@ func (p *Paillier) EncryptWithR(m, r *big.Int) ([]byte, error) {
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
 		return nil, ErrEnc
 	}
-	if r == nil || r.Sign() <= 0 || r.Cmp(p.n) >= 0 {
-		return nil, ErrEnc
-	}
 	// r must be a unit mod n: r^n mod n^2 is the blinding factor and the
 	// proof consumes r^e, so a non-unit would leak the factorization path.
-	if new(big.Int).GCD(nil, nil, r, p.n).Cmp(big.NewInt(1)) != 0 {
+	if !unit(r, p.n) {
 		return nil, ErrEnc
 	}
 	gm := new(big.Int).Exp(p.g, m, p.n2)
@@ -171,17 +203,17 @@ type zkProof struct {
 // never on the wire.
 func (p *Paillier) ProveEqual(ct []byte, m *big.Int, r *big.Int) ([]byte, error) {
 	c := new(big.Int).SetBytes(ct)
-	if c.Sign() <= 0 || c.Cmp(p.n2) >= 0 {
+	if !unit(c, p.n2) {
 		return nil, ErrEnc
 	}
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
 		return nil, ErrEnc
 	}
-	if r == nil || r.Sign() <= 0 || r.Cmp(p.n) >= 0 {
+	if !unit(r, p.n) {
 		return nil, ErrEnc
 	}
-	s, err := rand.Int(rand.Reader, p.n)
-	if err != nil || s.Sign() == 0 {
+	s, err := randomUnit(p.n)
+	if err != nil {
 		return nil, ErrEnc
 	}
 	a := new(big.Int).Exp(s, p.n, p.n2)
@@ -206,7 +238,7 @@ func (p *Paillier) VerifyEqual(ct []byte, m *big.Int, proof []byte) (bool, error
 		return false, nil // malformed proof: not an error, just no branch
 	}
 	c := new(big.Int).SetBytes(ct)
-	if c.Sign() <= 0 || c.Cmp(p.n2) >= 0 {
+	if !unit(c, p.n2) {
 		return false, nil
 	}
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
@@ -214,7 +246,7 @@ func (p *Paillier) VerifyEqual(ct []byte, m *big.Int, proof []byte) (bool, error
 	}
 	a := new(big.Int).SetBytes(pf.A)
 	z := new(big.Int).SetBytes(pf.Z)
-	if a.Sign() <= 0 || a.Cmp(p.n2) >= 0 || z.Sign() < 0 || z.Cmp(p.n) >= 0 {
+	if !unit(a, p.n2) || !unit(z, p.n) {
 		return false, nil
 	}
 	e := zkChallenge(ct, m.Bytes(), a.Bytes(), p.n)

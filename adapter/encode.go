@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
 // SignedPayload is the exact persisted object replayed on every retry.
@@ -31,13 +31,22 @@ func DecodePayload(raw []byte) (SignedPayload, error) {
 	if json.Unmarshal(raw, &p) != nil || p.Version != Version {
 		return SignedPayload{}, ErrItem
 	}
-	if p.Kind == KindAgreement && p.Operation != nil && len(p.Signature) > 0 {
-		return p, nil
+	if (p.Operation != nil) == (p.Command != nil) {
+		return SignedPayload{}, ErrItem
 	}
-	if p.Kind == KindProtocol && p.Command != nil && len(p.Signature) > 0 {
-		return p, nil
+	switch p.Kind {
+	case KindAgreement:
+		if p.Operation == nil || p.Command != nil || len(p.Signature) == 0 || p.Operation.ID == "" {
+			return SignedPayload{}, ErrItem
+		}
+	case KindProtocol:
+		if p.Command == nil || p.Operation != nil || len(p.Signature) == 0 || p.Command.RequestID == "" || p.Command.ProtocolID == "" {
+			return SignedPayload{}, ErrItem
+		}
+	default:
+		return SignedPayload{}, ErrItem
 	}
-	return SignedPayload{}, ErrItem
+	return p, nil
 }
 
 func CommandHash(signedObject []byte) string { return nex.Hash(signedObject) }

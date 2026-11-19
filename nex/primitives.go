@@ -1,9 +1,9 @@
 package nex
 
 import (
-	"github.com/WillBeebe/nexum/internal/message"
-	"github.com/WillBeebe/nexum/internal/nexum"
-	"github.com/WillBeebe/nexum/internal/settle"
+	"github.com/WillBeebe/nexum/v2/internal/message"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/settle"
 	"time"
 )
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/settle"
+	"github.com/WillBeebe/nexum/v2/internal/settle"
 )
 
 // Move is one agent step in a Room two-agent escrow. The kernel
@@ -50,6 +50,9 @@ func (a *Agreement) isSealed() bool {
 // kernel never holds a plaintext partial. After the first seal the
 // escrow is locked — the buyer cannot unwind (no takeback).
 func (a *Agreement) sealLock(actor Party, partial int64, now time.Time) error {
+	if err := a.requireExecutableCustody(); err != nil {
+		return err
+	}
 	if actor != a.Buyer {
 		return ErrWrongParty
 	}
@@ -76,6 +79,7 @@ func (a *Agreement) sealLock(actor Party, partial int64, now time.Time) error {
 	a.Sealed = ledger
 	a.SealedLocks = locks
 	a.SealedSum = sum
+	a.SealedAggregate = append([]byte(nil), sum...)
 	a.Status = StatusLocked
 	t := now.UTC()
 	a.LockedAt = &t
@@ -108,6 +112,8 @@ func (a *Agreement) acceptSealed(actor Party, now time.Time) error {
 	if !ok {
 		return fmt.Errorf("%w: equality proof rejected on ciphertext", settle.ErrSumMismatch)
 	}
+	aggregate := append([]byte(nil), a.SealedSum...)
+	proofCopy := append([]byte(nil), proof...)
 	// The proof is public (no plaintext inside): it rides the receipt so
 	// any fleet node or auditor can re-branch the accept with the public
 	// key. The committed Amount is contract terms, not a sealed value.
@@ -120,6 +126,14 @@ func (a *Agreement) acceptSealed(actor Party, now time.Time) error {
 	a.ClosedAt = &t
 	a.ReleasedTo = a.Seller
 	a.Status = StatusAccepted
+	a.SealedAggregate = aggregate
+	a.SealedEqualityProof = proofCopy
+	if len(a.PublicKey) == 0 && a.Sealed != nil {
+		a.PublicKey = a.Sealed.PublicModulus()
+	}
+	if a.Scheme == "" {
+		a.Scheme = SchemePaillier
+	}
 	a.SealedSum = nil // branch-once: a second release must refuse
 	return nil
 }
@@ -128,6 +142,9 @@ func (a *Agreement) acceptSealed(actor Party, now time.Time) error {
 // decrypting: the aggregate stays sealed, the buyer unwinds on
 // their side. The kernel sees no plaintext on the reject path.
 func (a *Agreement) rejectSealed(actor Party, now time.Time) error {
+	if err := a.requireExecutableCustody(); err != nil {
+		return err
+	}
 	if actor != a.Seller {
 		return ErrWrongParty
 	}
@@ -150,14 +167,27 @@ func (a *Agreement) rejectSealed(actor Party, now time.Time) error {
 // StartSealed arms this escrow for ciphertext settlement with an
 // `bits`-bit Paillier ledger. Call after OpenEscrow, before any move.
 func (a *Agreement) StartSealed(bits int) error {
-	if a.Status != StatusOpen {
+	if a.Format >= FormatV2 || a.Mode != "" {
 		return ErrBadState
+	}
+	if a.Status != StatusOpen || a.LockedAt != nil {
+		return ErrBadState
+	}
+	if a.Sealed != nil || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 {
+		return ErrBadState
+	}
+	for _, r := range a.Receipts {
+		if r.Action == "lock" || r.Action == "seal" {
+			return ErrBadState
+		}
 	}
 	l, err := settle.NewEncryptedLedger(bits)
 	if err != nil {
 		return err
 	}
 	a.Sealed = l
+	a.Scheme = SchemePaillier
+	a.PublicKey = l.PublicModulus()
 	return nil
 }
 

@@ -4,7 +4,7 @@ Nexum is an agreement framework for agents. **nex** is its Go client and local
 command-line demonstration. Agents sign commands that bind agreement terms and
 the current receipt head; the kernel enforces the permitted transitions.
 
-Experimental release **v0.3.0**, licensed under [Apache-2.0](LICENSE).
+Experimental release **v2.0.0**, licensed under [Apache-2.0](LICENSE).
 The source and tagged Go module are publicly available.
 
 See [Go installation and downstream usage](docs/INSTALL.md) for library imports,
@@ -24,26 +24,35 @@ go run ./examples/knowledge-exchange
 go run ./examples/collective-fund
 go run ./examples/return-handoff
 go run ./examples/reconcile-handoff
+go run ./examples/coordination
 ```
 
-The five collaboration labs plus the return and reconcile examples use the real
-Nexum implementation through `nex`. They need no hosted service, model key or
-GPU. The Go import path is `github.com/WillBeebe/nexum/nex`. Pin `v0.3.0` for
-this release. See [the design](docs/TECHNICAL_DESIGN.md) for API usage,
-architecture, trust boundaries and known limitations.
+The five collaboration labs plus the return, reconcile, and coordination
+examples use the real Nexum implementation through `nex`. They need no hosted
+service, model key or GPU. The Go import path is
+`github.com/WillBeebe/nexum/v2/nex`. Pin `v2.0.0` for this release. See
+[the design](docs/TECHNICAL_DESIGN.md) for API usage, architecture, trust
+boundaries and known limitations.
 
 ## What works here
 
 - Signed local agreement commands: lock, consent, verified-evidence settlement,
   rejection and expiry, with terminal-state and stale-command checks.
-- Amount-free Protocol agreements: admission, scoped roles, work and failure
-  reports, independent witness review, resolution and required return.
+- Amount-free Protocol agreements (`ProtocolVersion` v1 and `ProtocolVersionV2`):
+  admission, scoped roles, work and failure reports, content-addressed evidence
+  manifests, independent witness review, resolution, required return, and
+  explicit `incomplete` deadline closeout.
+- Multi-agent coordination (`GoalStore`, `CoordinationStore`) and portable
+  independently verifiable `TaskHandoff` proofs.
 - HPKE-wrapped content keys for consent-gated encrypted artifacts.
-- Additive Paillier ciphertext aggregation and equality proof verification.
-- Core council, delegation and workflow state machines, with tests; their
-  authenticated public client adapters remain future work.
+- Additive Paillier ciphertext aggregation and equality proof verification
+  (`SealedProofBundle` / `l2.ProfileSealedSettlement`).
+- Core council, delegation and workflow state machines, with Format 2 mode
+  commitment and Format 0 replay tests.
 - Local batch commitments and proof-of-work verification primitives.
-- Optional sender adapter for exact-command reconcile and fenced local handoff.
+- Optional sender adapter for exact-command reconcile, durable outbox admission
+  gating, and local/SQL fenced owner replacement (`DurableCoordinator`,
+  `SQLCoordinator`).
 
 ## Limits
 
@@ -61,8 +70,11 @@ third-party terms remain applicable; see [THIRD_PARTY.md](THIRD_PARTY.md).
 ## Durable integration
 
 Version 0.2.0 added encrypted local agreement storage and signed operation
-IDs for safe retries. Version 0.3.0 adds ProtocolStore and an optional
-adapter for lost-response reconcile and stopped-writer owner replacement.
-See [durable agreements](docs/DURABLE_AGREEMENTS.md),
-`go run ./examples/durable-retry` and `go run ./examples/reconcile-handoff`.
-The adapter does not provide distributed consensus or production fencing.
+IDs for safe retries. Version 0.3.0 added `ProtocolStore` and the optional
+sender adapter. Version 2.0.0 adds `ProtocolVersionV2` (reviewed artifact
+manifests and explicit `incomplete` closeouts), `GoalStore` / `CoordinationStore`
+/ portable `TaskHandoff` verification, durable/SQL fence coordinators, and
+canonical JSON receipt commitments under module path
+`github.com/WillBeebe/nexum/v2`. See [durable agreements](docs/DURABLE_AGREEMENTS.md),
+`go run ./examples/durable-retry`, `go run ./examples/reconcile-handoff`, and
+`go run ./examples/coordination`.

@@ -104,20 +104,93 @@ exit can leave encrypted `.pending-*` files; readers ignore them. Remove such
 files only while all writers are stopped. This implementation has no compactor.
 Storage-device or filesystem guarantees still bound power-loss durability.
 
+## Protocol commands
+
+`ProtocolStore` uses the same exact-retry rule. Persist the signed protocol
+command before sending it. A lost response is not proof the peer missed it.
+Resend those stored bytes. Do not call `Prepare` again, and do not invent a
+new request ID for the same command. The optional adapter does this through
+`Reconcile`. A transport may carry those bytes; it must not treat them as
+speech or replay speech to recover them. Comlink carries them on an `agree`
+packet and recovers a lost response with `agreement_reconcile`.
+
+A directory-sync failure after an already-committed protocol command is
+`ErrCommitUncertain` on both the latest-command retry and an older event whose
+current head did not advance. Retry the same signed bytes. That uncertainty is
+not a definitive refusal. A historical protocol response does not copy a later
+phase or work outcome onto the old command head. Current phase is a separate
+view. `WorkSucceeded` means a complete phase, an accepted resolution, a return,
+and no incomplete record. It does not authenticate caller-built JSON.
+
+`Store.Apply` still takes the time its caller supplies. The service adapter
+ignores `ApplyAt` inside a signed payload and uses the receiver clock for a
+first application. Tests may inject that receiver clock. An exact committed
+retry still returns the historical result after the deadline.
+
+The optional adapter outbox uses `pending`, retryable `unknown`,
+`awaiting-verification`, `resolved`, `conflict`, and definitive `refused`.
+Automatic retry skips `resolved`, `conflict`, and `refused`. `Unresolved` still
+lists conflicts and definitive refusals. A successful authority response stays
+unverified evidence until `RecordVerified` checks a signature. The same verified
+terminal can be recorded again. A different terminal is refused and is not
+applied again. New verified records keep that signature and the authority
+public key. Older rows without a signature stay locally authenticated vault
+history; loading them does not invent a portable signature. `Outbox` persists an
+AEAD-authenticated `admission.gate` record inside the vault (excluded from
+`*.box` item scans and included in `CopyPrivateDir` handoff manifests).
+`StopAdmission` latches the in-process flag and writes `Stopped: true` under the
+vault lock; `SealAdmission(generation)` and `ResumeAdmission(generation)` enforce
+monotonic fence generations across restarts, separate OS processes opening the
+same vault, and copied handoff directories (`AdmissionSealed` reports the
+persisted gate state and generation). Pending quota counts non-terminal
+rows. A separate history bound refuses new admission when retained rows reach
+it. Neither bound deletes retained evidence to free a slot.
+
+`CoordinationStore.Current` returns the latest lease, including one that a
+trusted height would treat as expired or finished. `StatusAt` derives
+`accepted`, `active`, `finalized`, or `reclaimable` from that height and does
+not persist expiry. Height zero is refused. A checkpoint may retain incomplete
+history and at most one accepted task result. An attempt completion is evidence.
+It does not by itself select the task result.
+
 ## What remains outside this guarantee
 
 - The sender's durable outbox and index of contract IDs are application-owned.
 - Encryption protects stored data, not against the running host or someone with
   its key. Losing the key prevents recovery. Key rotation needs a migration.
-- Restoring an old authenticated backup can roll back both state and the retry
-  index. Independent checkpoints/fencing are needed for anti-rollback protection.
+- Ownership fencing is provided in three `adapter.FenceCoordinator` tiers with
+  distinct guarantees: `Coordinator` is in-memory for single-process tests and
+  does not survive process restart; `DurableCoordinator` (`OpenCoordinator`)
+  persists AEAD-authenticated lease state (`coordinator.gate`) under cross-process
+  OS `flock` (`coordinator.lock`), recovering crash-safe monotonic generations
+  (`Issue` is refused once `Generation >= 1`); and `SQLCoordinator`
+  (`OpenSQLCoordinator`) stores AEAD-sealed leases in a shared SQL table
+  (`nex_fence_leases`) over `database/sql`, pairing `AuthorizeTx` (`FOR SHARE`
+  inside the destination's PostgreSQL transaction) with `StopAndFence`
+  (`FOR UPDATE`) so all in-flight destination writes finish before fence proof
+  is recorded. Both durable coordinators support `EpochSealer`
+  (`StopAndFence` / `ConfirmFenceProof`) to seal external destinations before
+  activating a replacement owner. Restoring an isolated offline full-VM or
+  full-directory snapshot that rolls back both local `Store`/`Vault` files and a
+  co-located local `DurableCoordinator` together still requires an external SQL
+  witness (`SQLCoordinator` on an independent PostgreSQL host) or an L2 receipt
+  anchor to detect rollback.
 - Currency transfers, tool calls, message delivery and other external effects
-  are not executed or made transactional by `Store.Apply`. Their destination
-  needs idempotency or reconciliation. Do not equate accepted with funds moved.
+  are not executed or made transactional by `Store.Apply`. The optional effect
+  adapter is a separate operation. It writes a durable `dispatching` record,
+  with the attempt count already incremented, before `Execute`. A confirmed
+  return is not success until a later durable record has phase `confirmed` and
+  confirmation evidence. After restart, `dispatching` and `unknown` reconcile
+  before another attempt. Automatic re-execution requires a destination that
+  guarantees durable idempotency for the full intent key, and it does not apply
+  to a legacy migrated row. Do not equate an accepted agreement with funds moved.
 - Council, delegation, workflow and encrypted message records do not acquire
   durable storage through this bilateral-contract API.
-- Caller-supplied time remains trusted input. Distributed ownership, trusted
-  clocks and a complete portable signature encoding are separate protocols.
+- Bilateral `Store.Apply` still trusts the time its caller passes. The service
+  path does not: `StoreAuthority.Apply` uses the receiver clock, so a signed
+  `ApplyAt` cannot backdate a first application. Distributed ownership and a
+  complete portable signature encoding for every historical record remain
+  separate protocols. Task height is a trusted monotone input, not a caller clock.
 
 ## Evidence
 

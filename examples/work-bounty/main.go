@@ -4,7 +4,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"github.com/WillBeebe/nexum/examples/internal/lab"
+	"github.com/WillBeebe/nexum/v2/examples/internal/lab"
 	"slices"
 	"sync"
 	"time"

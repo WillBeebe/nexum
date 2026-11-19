@@ -1,4 +1,4 @@
-# Collaboration examples — Nexum v0.3.0
+# Collaboration examples — Nexum v2.0.0
 
 Run from the repository root with Go 1.25 or newer:
 
@@ -10,6 +10,7 @@ go run ./examples/knowledge-exchange
 go run ./examples/collective-fund
 go run ./examples/return-handoff
 go run ./examples/reconcile-handoff
+go run ./examples/coordination
 go test -race ./examples/...
 ```
 

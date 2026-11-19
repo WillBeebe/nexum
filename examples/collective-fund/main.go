@@ -3,8 +3,8 @@ package main
 
 import (
 	"errors"
-	"github.com/WillBeebe/nexum/examples/internal/lab"
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/examples/internal/lab"
+	"github.com/WillBeebe/nexum/v2/nex"
 	"sync"
 	"time"
 )

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/settle"
+	"github.com/WillBeebe/nexum/v2/internal/settle"
 )
 
 // Sealed-path acceptance test: a two-agent Room escrow on ciphertext. The buyer's

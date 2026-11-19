@@ -3,6 +3,7 @@ package nex
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -330,5 +331,226 @@ func TestProtocolBundleRejectsDuplicateSuccessfulEvents(t *testing.T) {
 	b.Events = append(b.Events, b.Events[len(b.Events)-1])
 	if _, err := VerifyProtocolBundle(b, p.View().ID, p.View().Head); err == nil {
 		t.Fatal("duplicate committed event accepted")
+	}
+}
+
+func TestProtocolStoreTransactAtomicityAndCacheCoherence(t *testing.T) {
+	admitStep := func(actor Identity, role string) ProtocolStep {
+		return func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			who := protocolPublic(actor).ID()
+			for _, a := range v.Admitted {
+				if a == who {
+					return ProtocolCommand{}, nil, false, nil
+				}
+			}
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: who, Action: "admit", RequestID: "admit-" + role, Height: 1}
+			return cmd, Sign(actor, "protocol", cmd), true, nil
+		}
+	}
+	commitStep := func(owner Identity, scope string) ProtocolStep {
+		return func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			if v.Phase == "working" {
+				return ProtocolCommand{}, nil, false, nil
+			}
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(owner).ID(), GrantID: "owner", Scope: scope, Action: "commit", RequestID: "commit-owner", Height: 1}
+			return cmd, Sign(owner, "protocol", cmd), true, nil
+		}
+	}
+
+	// (a) atomic admit+commit
+	f := newProtocolFixture(t)
+	dir := filepath.Join(t.TempDir(), "protocols-a")
+	key := bytes.Repeat([]byte{7}, 32)
+	store, err := OpenProtocolStore(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Create(f.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := store.Transact(id, 1,
+		admitStep(f.owner, "owner"),
+		admitStep(f.worker, "worker"),
+		admitStep(f.witness, "witness"),
+		commitStep(f.owner, f.spec.Scope),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Phase != "working" {
+		t.Fatalf("phase %q", v.Phase)
+	}
+
+	// (b) mid-batch error leaves no partial persistence
+	f2 := newProtocolFixture(t)
+	f2.spec.DissentPolicy = "block"
+	dir2 := filepath.Join(t.TempDir(), "protocols-b")
+	store2, err := OpenProtocolStore(dir2, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := store2.Create(f2.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store2.Transact(id2, 1,
+		admitStep(f2.owner, "owner"),
+		admitStep(f2.worker, "worker"),
+		admitStep(f2.witness, "witness"),
+		commitStep(f2.owner, f2.spec.Scope),
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store2.Transact(id2, 5,
+		func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(f2.worker).ID(), GrantID: "worker", Scope: f2.spec.Scope, Action: "report", RequestID: "report-worker", Height: 5}
+			cmd.Report = &WorkReport{Outcome: WorkCompleted, Stage: "verification", ReasonHash: Hash("why"), Evidence: []string{Hash("result evidence")}}
+			return cmd, Sign(f2.worker, "protocol", cmd), true, nil
+		},
+		func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(f2.owner).ID(), GrantID: "owner", Scope: f2.spec.Scope, Action: "resolve", RequestID: "resolve-early", Height: 5}
+			cmd.Resolution = &Resolution{ReportHash: Hash(v.Report), Outcome: "accept", ReasonHash: Hash("r")}
+			return cmd, Sign(f2.owner, "protocol", cmd), true, nil
+		},
+	)
+	if err == nil || !errors.Is(err, ErrProtocolEvidence) {
+		t.Fatalf("got %v want ErrProtocolEvidence", err)
+	}
+	v2, err := store2.View(id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2.Phase != "working" || v2.Report != nil {
+		t.Fatalf("partial persist: phase=%s report=%v", v2.Phase, v2.Report)
+	}
+
+	// (c) cross-handle cache coherence
+	f3 := newProtocolFixture(t)
+	dir3 := filepath.Join(t.TempDir(), "protocols-c")
+	first, err := OpenProtocolStore(dir3, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id3, err := first.Create(f3.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Transact(id3, 1,
+		admitStep(f3.owner, "owner"),
+		admitStep(f3.worker, "worker"),
+		admitStep(f3.witness, "witness"),
+		commitStep(f3.owner, f3.spec.Scope),
+	); err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenProtocolStore(dir3, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportCmd, err := second.Prepare(id3, protocolPublic(f3.worker).ID(), "worker", f3.spec.Scope, "report", "report-worker", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportCmd.Report = &WorkReport{Outcome: WorkCompleted, Stage: "verification", ReasonHash: Hash("why"), Evidence: []string{Hash("result evidence")}}
+	if _, err := second.Apply(id3, reportCmd, Sign(f3.worker, "protocol", reportCmd), 5); err != nil {
+		t.Fatal(err)
+	}
+	final, err := first.Transact(id3, 8,
+		func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			if v.Phase != "review" {
+				return ProtocolCommand{}, nil, false, fmt.Errorf("want review got %s", v.Phase)
+			}
+			if len(v.Reviews) > 0 {
+				return ProtocolCommand{}, nil, false, nil
+			}
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(f3.witness).ID(), GrantID: "witness", Scope: f3.spec.Scope, Action: "review", RequestID: "review-witness", Height: 8}
+			cmd.Review = &WitnessReview{ReportHash: Hash(v.Report), AssessmentHash: Hash("independent assessment"), Dissent: false}
+			return cmd, Sign(f3.witness, "protocol", cmd), true, nil
+		},
+		func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			if v.Resolution != nil {
+				return ProtocolCommand{}, nil, false, nil
+			}
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(f3.owner).ID(), GrantID: "owner", Scope: f3.spec.Scope, Action: "resolve", RequestID: "resolve-owner", Height: 8}
+			cmd.Resolution = &Resolution{ReportHash: Hash(v.Report), Outcome: "accept", ReasonHash: Hash("decision rationale")}
+			return cmd, Sign(f3.owner, "protocol", cmd), true, nil
+		},
+		func(v ProtocolView) (ProtocolCommand, []byte, bool, error) {
+			if v.Return != nil {
+				return ProtocolCommand{}, nil, false, nil
+			}
+			m := ReturnManifest{ResolutionHash: Hash(v.Resolution), ReviewsHash: Hash(v.Reviews), Evidence: append([]string(nil), v.Report.Evidence...), Resources: v.Report.Resources, Uncertainty: "Only the declared evidence was checked", SafeAssumptions: []string{"No authority transfers to the next agent"}, Artifacts: []ReturnArtifact{{"answer", Hash("artifact bytes"), "Reuse with source citation"}}, Disposition: "continue", SuccessorSpecs: []string{Hash("proposed follow-on; fresh admission required")}}
+			cmd := ProtocolCommand{ProtocolID: v.ID, Head: v.Head, Actor: protocolPublic(f3.worker).ID(), GrantID: "worker", Scope: f3.spec.Scope, Action: "return", RequestID: "return-worker", Height: 8}
+			cmd.Return = &m
+			return cmd, Sign(f3.worker, "protocol", cmd), true, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Phase != "complete" {
+		t.Fatalf("phase %q", final.Phase)
+	}
+
+	// (d) in-place AEAD tamper despite warm cache
+	if _, err := first.View(id3); err != nil {
+		t.Fatal(err)
+	}
+	rawBytes, err := os.ReadFile(first.store.path(id3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBytes[len(rawBytes)-1] ^= 0xff
+	if err := os.WriteFile(first.store.path(id3), rawBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = first.View(id3)
+	if err == nil || !errors.Is(err, ErrCorruptStore) {
+		t.Fatalf("got %v want ErrCorruptStore", err)
+	}
+}
+
+func TestProtocolStoreCacheBoundedAndExportConfirmsDurability(t *testing.T) {
+	f := newProtocolFixture(t)
+	key := bytes.Repeat([]byte{51}, 32)
+	store, err := OpenProtocolStore(filepath.Join(t.TempDir(), "protocols-bounded"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastID string
+	for i := 0; i < maxCachedProtocols+20; i++ {
+		spec := f.spec
+		spec.Nonce = fmt.Sprintf("bounded-%03d", i)
+		id, err := store.Create(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.View(id); err != nil {
+			t.Fatal(err)
+		}
+		lastID = id
+	}
+	store.mu.Lock()
+	cacheLen := len(store.cache)
+	orderLen := len(store.cacheOrder)
+	store.mu.Unlock()
+	if cacheLen > maxCachedProtocols {
+		t.Fatalf("ProtocolStore cache exceeded cap: got %d > %d", cacheLen, maxCachedProtocols)
+	}
+	if orderLen > maxCachedProtocols*2 {
+		t.Fatalf("ProtocolStore cacheOrder exceeded bound: got %d", orderLen)
+	}
+
+	beforeSync := store.Stats().DirSyncOps
+	bundle, err := store.Export(lastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Stats().DirSyncOps <= beforeSync {
+		t.Fatalf("expected ProtocolStore.Export to confirm directory durability via syncDir: before=%d after=%d", beforeSync, store.Stats().DirSyncOps)
+	}
+	if _, err := VerifyProtocolBundle(bundle, lastID, lastID); err != nil {
+		t.Fatalf("exported bundle failed verification: %v", err)
 	}
 }

@@ -36,7 +36,7 @@ func SealWithOptions(i Identity, recipient Public, text []byte, invitation strin
 		return Offer{}, nil, err
 	}
 	o := Offer{Terms: Terms{Kind: Kind, ID: hex.EncodeToString(id), Sender: p, Recipient: recipient,
-		Invitation: invitation, CreatedAt: now.UTC(), ExpiresAt: expiry.UTC(), KeySuite: HPKESuite, ConversationID: options.ConversationID, ReplyTo: options.ReplyTo, Trade: options.Trade}}
+		Invitation: invitation, CreatedAt: now.UTC(), ExpiresAt: expiry.UTC(), KeySuite: HPKESuite, ConversationID: options.ConversationID, ReplyTo: options.ReplyTo, ReplyChain: options.ReplyChain, Trade: options.Trade}}
 	if options.KeySuite != "" {
 		o.Terms.KeySuite = options.KeySuite
 	}
@@ -45,10 +45,15 @@ func SealWithOptions(i Identity, recipient Public, text []byte, invitation strin
 	}
 	o.Ciphertext, err = encrypt(key, text, wire("text", o.Terms))
 	if err != nil {
+		clear(key)
 		return Offer{}, nil, err
 	}
 	o.Signature = sign(i, "offer", o.unsigned())
-	return o, key, o.Verify()
+	if err = o.Verify(); err != nil {
+		clear(key)
+		return Offer{}, nil, err
+	}
+	return o, key, nil
 }
 
 // WrapKey releases a content key only against the intended recipient's signed
@@ -67,11 +72,21 @@ func WrapKey(i Identity, o Offer, d Decision, contentKey []byte) (Release, error
 		return Release{}, ErrInvalid
 	}
 	// Refuse a damaged/mismatched local outbox key before releasing it.
-	if _, err := decrypt(contentKey, o.Ciphertext, wire("text", o.Terms)); err != nil {
+	plain, err := decrypt(contentKey, o.Ciphertext, wire("text", o.Terms))
+	if err != nil {
 		return Release{}, err
 	}
+	clear(plain)
 	if o.Terms.KeySuite == RekeySuite {
 		return wrapRekey(i, o, d, contentKey)
+	}
+	// Write deprecation: the legacy v1 suite wraps the content key to the
+	// recipient's long-lived identity key — one compromise retroactively
+	// unwraps every recorded release. New releases use HPKE (or the rekey
+	// suite for forward secrecy); legacy is read-compat for already-signed
+	// v1 offers only, enforced by the offer's signature below.
+	if o.Terms.KeySuite == "" && o.Terms.CreatedAt.After(legacySuiteWriteCutoff) {
+		return Release{}, ErrInvalid
 	}
 	if o.Terms.KeySuite == HPKESuite {
 		public, err := hpke.KEM_X25519_HKDF_SHA256.Scheme().UnmarshalBinaryPublicKey(o.Terms.Recipient.Encryption)
@@ -104,6 +119,7 @@ func WrapKey(i Identity, o Offer, d Decision, contentKey []byte) (Release, error
 	if err != nil {
 		return Release{}, err
 	}
+	defer clear(wrappingKey)
 	r.WrappedKey, err = encrypt(wrappingKey, contentKey, r.context())
 	if err != nil {
 		return Release{}, err
@@ -147,6 +163,7 @@ func Open(i Identity, r Record) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer clear(key)
 		return decrypt(key, r.Offer.Ciphertext, wire("text", r.Offer.Terms))
 	}
 	private, err := ecdh.X25519().NewPrivateKey(i.Encryption)
@@ -157,10 +174,12 @@ func Open(i Identity, r Record) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clear(key)
 	contentKey, err := decrypt(key, r.Release.WrappedKey, r.Release.context())
 	if err != nil {
 		return nil, err
 	}
+	defer clear(contentKey)
 	return decrypt(contentKey, r.Offer.Ciphertext, wire("text", r.Offer.Terms))
 }
 
@@ -177,6 +196,7 @@ func derive(private *ecdh.PrivateKey, public, context []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clear(secret)
 	salt := sha256.Sum256(context)
 	return hkdf.Key(sha256.New, secret, salt[:], "nex/message/v1/content-key", 32)
 }
@@ -218,3 +238,7 @@ func messageHPKE() hpke.Suite {
 func hpkeInfo(o Offer, d Decision) []byte {
 	return wire("hpke", []string{HPKESuite, o.Hash(), d.Hash()})
 }
+
+// legacySuiteWriteCutoff freezes new legacy-suite releases at this instant;
+// offers signed before it still release, later ones must pick a suite.
+var legacySuiteWriteCutoff = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)

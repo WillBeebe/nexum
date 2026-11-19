@@ -4,7 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 	"os"
 	"time"
 )

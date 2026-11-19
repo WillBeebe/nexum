@@ -1,12 +1,14 @@
 package l2
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/nexum"
-	"github.com/WillBeebe/nexum/internal/pow"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/pow"
+	"github.com/WillBeebe/nexum/v2/quarry/keccak"
 )
 
 // closed builds a fully accepted house escrow, the barter unit.
@@ -188,5 +190,94 @@ func TestVerifyEmptyRoot(t *testing.T) {
 	h := pow.Header{DiffBits: 8}
 	if err := Verify(nil, h, 8); err == nil {
 		t.Fatal("empty batch verified")
+	}
+}
+
+// TestTermsDigestFollowsKernel pins the single source of truth: the L2
+// terms digest must be exactly the keccak re-commitment to the kernel's
+// Agreement.TermsDigest. Any kernel terms change moves both together.
+func TestTermsDigestFollowsKernel(t *testing.T) {
+	now := time.Date(2026, 9, 3, 1, 0, 0, 0, time.UTC)
+	a := closed(t, "h-kernel", 350_000, now)
+	l2, err := TermsDigest(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := keccak.NewLegacyKeccak256()
+	_, _ = st.Write([]byte("nex/l2/v1/terms\x00"))
+	kernel, _ := hex.DecodeString(a.TermsDigest())
+	_, _ = st.Write(kernel)
+	var want [32]byte
+	copy(want[:], st.Sum(nil))
+	if l2 != want {
+		t.Fatal("L2 terms digest is not the keccak commitment to the kernel digest")
+	}
+	// A kernel terms rewrite must move the L2 digest with it.
+	a.Amount = 1
+	l2b, err := TermsDigest(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l2b == l2 {
+		t.Fatal("L2 digest blind to kernel terms change — sources drifted")
+	}
+}
+
+func TestBatchSealsExecutionPolicy(t *testing.T) {
+	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	a := closed(t, "execution-policy", 1, now)
+	batch, err := Seal([]*nexum.Agreement{a}, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBatch(batch, 1); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*nexum.Agreement){
+		"deadline": func(a *nexum.Agreement) { a.Deadline = now.Add(100 * time.Hour) },
+		"cost":     func(a *nexum.Agreement) { a.Meter.CostUSD++ },
+		"effort":   func(a *nexum.Agreement) { a.Meter.Effort = "changed" },
+		"budget":   func(a *nexum.Agreement) { a.Meter.BudgetUSD++ },
+		"steps":    func(a *nexum.Agreement) { a.Meter.MaxSteps++ },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			changed := *a
+			mutate(&changed)
+			if err := changed.VerifyReceipts(); err != nil {
+				t.Fatalf("fixture must leave receipt commitments unchanged: %v", err)
+			}
+			if err := Verify([]*nexum.Agreement{&changed}, batch.Header, 1); err == nil {
+				t.Fatal("policy rewrite accepted under original seal")
+			}
+		})
+	}
+}
+
+func TestVerifyBatchRejectsRewrittenExecutionOutcome(t *testing.T) {
+	for name, mutate := range map[string]func(*nexum.Agreement){
+		"status":      func(a *nexum.Agreement) { a.Status = nexum.StatusRejected },
+		"beneficiary": func(a *nexum.Agreement) { a.ReleasedTo = a.Buyer },
+		"lockTime": func(a *nexum.Agreement) {
+			changed := a.LockedAt.Add(time.Second)
+			a.LockedAt = &changed
+		},
+		"closeTime": func(a *nexum.Agreement) { a.ClosedAt = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			a := closed(t, "outcome-rewrite", 7, now)
+			batch, err := Seal([]*nexum.Agreement{a}, 4, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyBatch(batch, 4); err != nil {
+				t.Fatal(err)
+			}
+			mutate(a)
+			if err := VerifyBatch(batch, 4); err == nil {
+				t.Fatal("unchanged seal accepted a rewritten execution outcome")
+			}
+		})
 	}
 }

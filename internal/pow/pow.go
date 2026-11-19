@@ -4,6 +4,7 @@
 package pow
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/WillBeebe/nexum/quarry/keccak"
+	"github.com/WillBeebe/nexum/v2/quarry/keccak"
 )
 
 // Header is what we seal. BatchRoot binds the L2 agreements.
@@ -63,7 +64,14 @@ func (h Header) Valid() bool {
 }
 
 // Search burns worker cycles until Valid. workers<=0 uses GOMAXPROCS.
+// Prefer SearchContext so a broker can bound the burn (metering doctrine).
 func Search(h Header, workers int) (Header, uint64, error) {
+	return SearchContext(context.Background(), h, workers)
+}
+
+// SearchContext is Search with cancellation. A canceled search returns
+// ctx.Err() and burns no further cycles.
+func SearchContext(ctx context.Context, h Header, workers int) (Header, uint64, error) {
 	if h.DiffBits < 0 || h.DiffBits > 64 {
 		return Header{}, 0, fmt.Errorf("pow: DiffBits %d", h.DiffBits)
 	}
@@ -76,6 +84,16 @@ func Search(h Header, workers int) (Header, uint64, error) {
 		wg    sync.WaitGroup
 	)
 	found.Store(^uint64(0))
+	// Watch for cancellation while workers burn.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			ok.Store(true) // release workers
+		case <-stop:
+		}
+	}()
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		w := w
@@ -96,6 +114,9 @@ func Search(h Header, workers int) (Header, uint64, error) {
 		}()
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return Header{}, 0, err
+	}
 	n := found.Load()
 	h.Nonce = n
 	if !h.Valid() {

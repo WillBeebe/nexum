@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
 func TestLostResponseExactRetryStore(t *testing.T) {
@@ -58,6 +58,34 @@ func TestLostResponseExactRetryProtocol(t *testing.T) {
 	v, err := w.store.View(w.id)
 	if err != nil || len(v.Admitted) != 1 {
 		t.Fatal(v, err)
+	}
+}
+
+func TestProtocolV2AuthorityUsesReceiverHeight(t *testing.T) {
+	w := newProtocolWorld(t)
+	w.spec.Version = nex.ProtocolVersionV2
+	var err error
+	w.id, err = w.store.Create(w.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := w.enqueue(t, testOutbox(t), w.owner, "", "admit", "owner-admit", 1, nil)
+	if _, err := w.inner.Apply(item); !errors.Is(err, nex.ErrProtocolAuthority) {
+		t.Fatalf("accepted v2 with no receiver height: %v", err)
+	}
+	height := w.spec.WorkByHeight
+	w.inner.Height = func() uint64 { return height }
+	if _, err := w.inner.Apply(item); !errors.Is(err, nex.ErrProtocolStale) {
+		t.Fatalf("accepted sender's earlier height: %v", err)
+	}
+	height = 1
+	first, err := w.inner.Apply(item)
+	if err != nil || first.ReceiptHead == "" {
+		t.Fatal(first, err)
+	}
+	height = w.spec.ReturnByHeight
+	if retry, err := w.inner.Apply(item); err != nil || retry.ReceiptHead != first.ReceiptHead {
+		t.Fatal(retry, err)
 	}
 }
 
@@ -215,7 +243,7 @@ func TestLostEffectDoesNotReexecute(t *testing.T) {
 		t.Fatal("reexecuted", dest.Executions(intent.EffectID))
 	}
 	rec, err := effects.Get(tenant, intent.EffectID)
-	if err != nil || rec.Status != EffectUnknown {
+	if err != nil || rec.Phase != EffectPhaseUnknown || rec.Confirmed {
 		t.Fatal(rec, err)
 	}
 }
@@ -312,6 +340,70 @@ func TestBackoffDueAndStopAdmission(t *testing.T) {
 	}
 }
 
+func TestOutboxDurableAdmissionGateAcrossReopenAndCopy(t *testing.T) {
+	w := newStoreWorld(t)
+	key := testKey(t)
+	dir := filepath.Join(t.TempDir(), "outbox")
+	o, err := OpenOutbox(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed, gen, err := o.AdmissionSealed(); err != nil || sealed || gen != 0 {
+		t.Fatalf("initial gate: sealed=%v gen=%d err=%v", sealed, gen, err)
+	}
+	item := w.enqueueLock(t, o, "lock-before-seal")
+	if err := o.SealAdmission(1); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenOutbox(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed, gen, err := reopened.AdmissionSealed(); err != nil || !sealed || gen != 1 {
+		t.Fatalf("reopened gate: sealed=%v gen=%d err=%v", sealed, gen, err)
+	}
+	op2, err := w.store.Prepare(w.contract.ID(), "lock-blocked", "lock", "checked artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw2, err := EncodeOperation(op2, nex.Sign(w.buyer, "operation", op2), w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := OutboundItem{Version: Version, Tenant: tenant, AgreementID: w.contract.ID(), OperationID: "lock-blocked", Kind: KindAgreement, SignedObject: raw2, Destination: "authority-1", CreatedAt: w.now}
+	if err := reopened.Enqueue(blocked); !errors.Is(err, ErrAdmissionStopped) {
+		t.Fatalf("expected ErrAdmissionStopped on reopened outbox, got %v", err)
+	}
+	if _, err := reopened.Reconcile(tenant, item.OperationID, w.inner); err != nil {
+		t.Fatalf("reconcile existing item while sealed failed: %v", err)
+	}
+
+	copiedDir := filepath.Join(t.TempDir(), "outbox-copy")
+	if err := CopyPrivateDir(dir, copiedDir); err != nil {
+		t.Fatal(err)
+	}
+	copied, err := OpenOutbox(copiedDir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copied.Enqueue(blocked); !errors.Is(err, ErrAdmissionStopped) {
+		t.Fatalf("expected copied outbox to preserve sealed gate, got %v", err)
+	}
+	if err := copied.ResumeAdmission(0); !errors.Is(err, ErrActivation) {
+		t.Fatalf("expected stale generation resume refusal, got %v", err)
+	}
+	if err := copied.ResumeAdmission(2); err != nil {
+		t.Fatal(err)
+	}
+	if sealed, gen, err := copied.AdmissionSealed(); err != nil || sealed || gen != 2 {
+		t.Fatalf("resumed gate: sealed=%v gen=%d err=%v", sealed, gen, err)
+	}
+	if err := copied.Enqueue(blocked); err != nil {
+		t.Fatalf("enqueue after ResumeAdmission failed: %v", err)
+	}
+}
+
 func TestIdempotentEffectReconcilesWithoutReexecute(t *testing.T) {
 	effects, err := OpenEffects(filepath.Join(t.TempDir(), "effects"), testKey(t))
 	if err != nil {
@@ -332,7 +424,7 @@ func TestIdempotentEffectReconcilesWithoutReexecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, err := effects.Get(tenant, intent.EffectID)
-	if err != nil || rec.Status != EffectConfirmed || dest.Executions(intent.EffectID) != 1 {
+	if err != nil || rec.Phase != EffectPhaseConfirmed || !rec.Confirmed || dest.Executions(intent.EffectID) != 1 {
 		t.Fatal(rec, dest.Executions(intent.EffectID), err)
 	}
 }

@@ -20,7 +20,7 @@ or turn a signature into permission to run a tool. Those effects belong to an
 application adapter that owns the relevant resource and enforces the agreement.
 
 **Nexum** names the framework. **nex** names its public client. The intended
-public import is `github.com/WillBeebe/nexum/nex`. An application embeds that
+public import is `github.com/WillBeebe/nexum/v2/nex`. An application embeds that
 client in its own infrastructure; no hosted Nexum account is required.
 
 The trust boundary has three parts:
@@ -131,8 +131,12 @@ stateDiagram-v2
 
 `agree` records consent while leaving the agreement locked. It is not the
 terminal `Accepted` state. Settlement makes that terminal transition after
-consent and evidence. A lock in this implementation is recorded accounting
-state and ciphertext; the resource authority must make the actual reservation.
+consent and evidence. Consent is historical: `Agreed` stays true after a later
+reject or expire. `Phase` is `agreed` only while the agreement is still locked
+and consent is the latest open decision. `ConsentHistory` keeps the agree event
+and that later reject or expire. A lock in this implementation is recorded
+accounting state and ciphertext; the resource authority must make the actual
+reservation.
 
 | Command | Signer selected by nex | Checks and transition |
 |---|---|---|
@@ -186,6 +190,20 @@ ledger is armed. Direct `Reject` also dispatches to the sealed path. Lower-level
 allows either party, while this client restricts its expiry command to the buyer.
 The direct accept/reject methods do not enforce deadline windows; that policy
 is supplied by the client.
+
+Format 1 keeps the original terms digest domain `nex/nexum/v1/terms`.
+`StartSealed` is legal only before any lock, and only while format and mode
+are still unset. Once sealed mode, a live ledger, ciphertext, an aggregate, or
+a seal receipt is present, plaintext `Lock` is refused. JSON omits the private
+ledger. A decoded snapshot on the sealed path cannot mutate until private
+custody is restored; acceptance and rejection do not fall through to the
+plaintext transition. Format 2 commits plaintext or sealed mode before the
+opening receipt. Its terms digest uses `nex/nexum/v2/terms` and includes mode,
+scheme, and public key. Sealed acceptance checks the equality proof, clears
+the mutable sum, and retains the aggregate and proof. Existing format 1
+receipt hashes are not rewritten. An L2 format 1 execution-policy digest is
+unchanged. Format 2 agreements use `nex/l2/v2/execution-policy`, which includes
+mode, scheme, and an RFC3339Nano deadline.
 
 “No takeback” means that the allowed transition API refuses reversal. It does
 not mean a malicious operator cannot replace memory or restore an old backup.
@@ -257,8 +275,25 @@ requirements are satisfied; it does not itself mean unanimous consent.
 
 Any participating actor can execute only when every requirement is satisfied
 and every party has opted in. Execution records a terminal `executed` outcome.
-A party can instead refuse before terminal state, producing `refused`. Recording
-execution does not run the named decision in external infrastructure.
+A party can instead refuse before terminal state, producing `refused`. Refusal
+after opt-in stays legal, and the opt-in remains history. Recording execution
+does not run the named decision in external infrastructure.
+
+`OpenCouncil` commits format 2 and rejects `:` or untrimmed whitespace in
+requirement IDs. The decision is in the terms digest and the genesis event. A
+different decision is a new council. A format 2 council with no requirements
+starts `ready` and still needs unanimous opt-in before execute. Format 0
+councils keep their original notes and terms digest, and replay actor roles,
+phase transitions, `OptedIn`, `Status`, `Decision`, and `ClosedAt` against the
+snapshot. Format 0 `satisfy` notes (`reqID + ":" + citation`) are prefix-matched
+against the `Reqs` committed in the terms digest: when the assignment is
+unambiguous (including citations containing colons), `ReceiptAssurance` reports
+`state-replay` (`AssuranceStateReplay`). Only when a single holder had
+prefix-colliding requirement IDs with multiple valid snapshot assignments does
+`ReceiptAssurance` report `legacy-chain-only` (`AssuranceLegacyChain`), while
+still enforcing full phase, consent, decision, and close-time replay. An
+embedded key shows who signed the bytes. The actor still has to be a council
+party.
 
 ### Delegation: claim, proof, reward
 
@@ -269,24 +304,73 @@ The parent may cancel only while the task is still offered. Once claimed, a
 cancellation attempt is refused. The `paid` status assigns the recorded reward;
 a separate custody adapter must perform any real transfer.
 
+`OpenDelegate` commits format 2. Rejection from claimed or proven state stays
+legal. Format 2 uses `reject` with stage `claimed` when no proof was submitted,
+and `reject-proof` only after proof. Format 0 keeps the historical receipt
+text and still replays the chain. The proof, when present, is the whole note.
+`DerivedRejectStage` distinguishes a pre-proof rejection. An embedded key is
+not by itself the parent or the intern.
+
 ### Workflow: facts select a deterministic path
 
 A workflow names a root, an authorized actor and gate/action nodes. A gate picks
 the first child, in listed order, whose required facts are true. Walking detects
 missing paths and loops. Executing records the selected path/action and becomes
-terminal. Missing or false facts cannot satisfy a requirement. The workflow
-trusts supplied facts; verification of those facts belongs to the host.
+terminal. Missing or false facts cannot satisfy a requirement. Supplied facts
+are committed, not verified. `FactsAssurance` is `committed` when the facts were
+supplied and the tree was walked. A facts digest without the facts is
+`commitment-only`: it establishes the digest and the recorded path, not an
+independent branch selection. This kernel rejects `verified` because it has no
+host-fact proof.
+
+`OpenWorkflow` commits format 2, keeps the step-only meter, and rejects
+whitespace or `[` and `]` in new node IDs. `Require` and `Next` are copied at
+construction. Map keys must match normalized node IDs, duplicate normalized IDs
+are rejected, and child references are checked against that graph. Format 0
+workflows keep their original terms digest and receipt hashes, replay the
+`[open, execute]` sequence, `Status`, and `ClosedAt`, and match the `execute`
+note against simple walks through the committed `Nodes` graph to verify `Path`
+and `Action`. When a unique walk matches, `ReceiptAssurance` reports
+`path-replay` (`AssurancePathReplay`) — distinct from `state-replay`
+(`AssuranceStateReplay`) because format 0 receipts did not commit the input
+`facts` map (`FactsAssurance` stays empty). If historical format 0 node IDs
+contained whitespace that makes multiple graph walks format identically,
+verification still requires `(Path, Action)` to match one of those walks and
+reports `legacy-chain-only` (`AssuranceLegacyChain`). A failed step bound does
+not choose a path or move the receipt head.
+
+A failed maximum-step or budget check on any of these ledgers leaves the prior
+head in place. It does not increment steps, satisfy a requirement, consume an
+opt-in, store a proof, or choose a workflow path. Empty receipt history cannot
+establish a terminal snapshot. Format 0 hashes are not rewritten, and old
+events are not re-signed.
 
 ## 6. Receipts, metering and failure semantics
 
 ### Receipt guarantees
 
 Each receipt contains sequence, time, action, actor, note, previous hash and
-current hash. `VerifyReceipts` checks sequencing and hash consistency. It does
-not replay policy, verify a portable set of signed commands, or prevent an owner
-from replacing and rehashing the entire chain. The current receipt hash encoding
-also needs a canonical-format review before it is a stable cross-language wire
-contract.
+current hash. `VerifyReceipts` checks sequencing, hash consistency, and that
+the snapshot's status, beneficiary, and close times match the recorded actions.
+That is receipt-chain verification. It does not verify a Paillier settlement,
+a portable set of signed commands, or prevent an owner from replacing and
+rehashing the entire chain. The current receipt hash encoding also needs a
+canonical-format review before it is a stable cross-language wire contract.
+
+Two verification profiles separate chain integrity from cryptographic
+settlement proof. The `receipt-chain` profile (`Agreement.VerifyReceipts`, and
+`l2.Verify` / `l2.VerifyBatch` under `l2.ProfileReceiptChain`) checks receipt
+sequencing, hashes, embedded signatures when present, and replayed snapshot
+outcomes. The `sealed-settlement` profile (`l2.ProfileSealedSettlement`)
+requires a `SealedProofBundle` built by `Agreement.PublicSealedProof()`.
+`nexum.VerifySealedProofBundle` and `l2.VerifySealed` check the public Paillier
+group membership, ciphertext SHA-256 commitments (at most 128 locks),
+homomorphic aggregate, and equality proof against the public amount without
+Paillier private factors or encryption randomness.
+`Agreement.VerifySealedSettlement` binds that verified bundle to the
+agreement's verified receipt chain, ordered `seal` notes, terms digest, and
+receipt head. Missing proof material is refused rather than downgraded; a
+`receipt-chain` success is not a `sealed-settlement` success.
 
 The public client exposes a head and verification operation, not a complete
 signed receipt export/import API. For independent verification, the proposed
@@ -338,11 +422,17 @@ low-order X25519 inputs. Identity admission and trust remain the application's
 responsibility; there is no public number registry in the candidate.
 
 `Seal` encrypts a UTF-8 artifact with a fresh AES-256-GCM content key and signs
-the envelope. The content key remains with the sender. `Decide` signs recipient
-consent to the envelope hash. `WrapKey` verifies consent and wraps the content
-key for that recipient using X25519/HKDF-SHA256/AES-256-GCM HPKE. `Open` verifies
-the linked record before decrypting. The implementation uses Cloudflare CIRCL
-for HPKE and Go cryptographic libraries for supporting operations.
+the envelope. The content key remains with the sender. Signed `Offer` `Terms`
+commit `CreatedAt` and `ExpiresAt` (bounding recipient `Decide` /
+`ApplyDecision`), plus an optional `ReleaseBy` deadline (`*time.Time`, omitted
+from JSON when unset so existing v1 offer hashes and signatures are unchanged).
+When `ReleaseBy` is set, `Offer.Verify` requires it to strictly follow
+`ExpiresAt`, and `Record.ApplyReleaseAt` refuses sender key release at or after
+`ReleaseBy` with `ErrExpired`. `Decide` signs recipient consent to the envelope
+hash. `WrapKey` verifies consent and wraps the content key for that recipient
+using X25519/HKDF-SHA256/AES-256-GCM HPKE. `Open` verifies the linked record
+before decrypting. The implementation uses Cloudflare CIRCL for HPKE and Go
+cryptographic libraries for supporting operations.
 
 The envelope codec also retains the existing legacy empty-suite path for
 compatibility. New `Seal` calls select HPKE. The public build rejects unsupported

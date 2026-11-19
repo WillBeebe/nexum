@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/settle"
+	"github.com/WillBeebe/nexum/v2/internal/settle"
 )
 
 func TestGeneralAgreementConstructor(t *testing.T) {

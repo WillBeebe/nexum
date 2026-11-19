@@ -102,9 +102,11 @@ type Terms struct {
 	Invitation     string     `json:"invitation"`
 	CreatedAt      time.Time  `json:"created_at"`
 	ExpiresAt      time.Time  `json:"expires_at"`
+	ReleaseBy      *time.Time `json:"release_by,omitempty"`
 	KeySuite       string     `json:"key_suite,omitempty"`
 	ConversationID string     `json:"conversation_id,omitempty"`
 	ReplyTo        string     `json:"reply_to,omitempty"`
+	ReplyChain     string     `json:"reply_chain,omitempty"`
 	Trade          *TradeLink `json:"trade,omitempty"`
 }
 
@@ -119,13 +121,17 @@ func (o Offer) Hash() string    { return digest("offer", o.unsigned()) }
 
 func (o Offer) Verify() error {
 	t := o.Terms
-	if !supportedKeySuite(t.KeySuite) || (t.ConversationID != "" && !validID(t.ConversationID)) || (t.ReplyTo != "" && !validID(t.ReplyTo)) {
+	if !supportedKeySuite(t.KeySuite) || (t.ConversationID != "" && !validID(t.ConversationID)) || (t.ReplyTo != "" && !validID(t.ReplyTo)) ||
+		(t.ReplyChain != "" && !validHash(t.ReplyChain)) {
 		return ErrInvalid
 	}
 	if t.KeySuite == RekeySuite && !validID(t.ConversationID) {
 		return ErrInvalid
 	}
 	if t.Trade != nil && t.Trade.Validate() != nil {
+		return ErrInvalid
+	}
+	if t.ReleaseBy != nil && !t.ReleaseBy.After(t.ExpiresAt) {
 		return ErrInvalid
 	}
 	if t.Kind != Kind || !validID(t.ID) || t.Sender.Validate() != nil || t.Recipient.Validate() != nil ||
@@ -257,6 +263,21 @@ func (r Record) State(now time.Time) string {
 	return "offered"
 }
 
+// canonicalStatus is the stored relay fact. Expiry is evaluated from the
+// offer timestamp when a caller asks; it is not written as a status.
+func canonicalStatus(r Record) string {
+	if r.Release != nil {
+		return "key-released"
+	}
+	if r.Decision != nil {
+		if r.Decision.Action == "agree" {
+			return "accepted"
+		}
+		return "rejected"
+	}
+	return "offered"
+}
+
 func (r Record) ApplyDecision(d Decision, now time.Time) (Record, error) {
 	if err := d.Verify(r.Offer); err != nil {
 		return r, err
@@ -278,6 +299,10 @@ func (r Record) ApplyDecision(d Decision, now time.Time) (Record, error) {
 }
 
 func (r Record) ApplyRelease(release Release) (Record, error) {
+	return r.ApplyReleaseAt(release, time.Time{})
+}
+
+func (r Record) ApplyReleaseAt(release Release, now time.Time) (Record, error) {
 	if r.Decision == nil {
 		return r, ErrState
 	}
@@ -289,6 +314,9 @@ func (r Record) ApplyRelease(release Release) (Record, error) {
 			return r, nil
 		}
 		return r, ErrState
+	}
+	if !now.IsZero() && r.Offer.Terms.ReleaseBy != nil && !now.Before(*r.Offer.Terms.ReleaseBy) {
+		return r, ErrExpired
 	}
 	r.Release = &release
 	return r, nil
@@ -315,4 +343,17 @@ func equalJSON(a, b any) bool { return string(wire("equal", a)) == string(wire("
 func validID(id string) bool {
 	b, err := hex.DecodeString(id)
 	return err == nil && len(b) == 32 && hex.EncodeToString(b) == id
+}
+
+// validHash accepts exactly a lowercase 64-hex digest, like Record hashes.
+func validHash(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	for _, c := range h {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
 const Version = 1
@@ -34,14 +34,23 @@ const (
 )
 
 const (
-	StatusPending  = "pending"
-	StatusUnknown  = "unknown"
+	// StatusPending has not been submitted.
+	StatusPending = "pending"
+	// StatusUnknown is retryable: the outcome is unknown or the refusal may
+	// succeed on an exact retry. It is not a verified terminal.
+	StatusUnknown = "unknown"
+	// StatusAwaiting holds an authority response that is not yet verified.
+	StatusAwaiting = "awaiting-verification"
+	// StatusResolved is a verified success. StatusConflict is a verified
+	// conflict. StatusRefused is a definitive refusal of these exact bytes.
 	StatusResolved = "resolved"
 	StatusConflict = "conflict"
+	StatusRefused  = "refused"
 )
 
 var (
 	ErrQuota            = errors.New("adapter: outbound quota exhausted")
+	ErrDefinitive       = errors.New("adapter: exact command definitively refused")
 	ErrTenant           = errors.New("adapter: tenant mismatch")
 	ErrForeign          = errors.New("adapter: foreign agreement or command")
 	ErrLostResponse     = errors.New("adapter: transport response lost")
@@ -105,12 +114,18 @@ type AuthenticatedResponse struct {
 	Phase       string
 	WorkOutcome string
 	Error       string
+	// Definitive marks a refusal of this exact signed command. A zero value
+	// stays retryable.
+	Definitive bool
 }
 
 // WorkSucceeded reports whether declared work was accepted. Protocol completion
 // alone is not success: a failure return can complete its obligations.
+// WorkSucceeded is a convenience predicate over an already validated view.
+// It is not authentication of caller-built JSON. Success needs a complete
+// phase, an accepted resolution, a return, and no incomplete record.
 func WorkSucceeded(v nex.ProtocolView) bool {
-	return v.Phase == "complete" && v.Resolution != nil && v.Resolution.Outcome == "accept"
+	return v.Phase == "complete" && v.Resolution != nil && v.Resolution.Outcome == "accept" && v.Return != nil && v.Incomplete == nil
 }
 
 type ViewSnapshot struct {

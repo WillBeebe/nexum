@@ -3,7 +3,7 @@ package lab
 
 import (
 	"encoding/json"
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 	"os"
 	"time"
 )

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
 )
 
 func TestSealBatch(t *testing.T) {

@@ -4,7 +4,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
 // StoreAuthority submits exact signed operations to nex.Store.
@@ -32,20 +33,21 @@ func (a *StoreAuthority) Apply(item OutboundItem) (AuthenticatedResponse, error)
 	payload, err := DecodePayload(item.SignedObject)
 	if err != nil || payload.Kind != KindAgreement || payload.Operation == nil {
 		base.Kind = ResultRefused
+		base.Definitive = true
 		base.Error = ErrItem.Error()
 		return base, ErrItem
 	}
 	op := *payload.Operation
 	if op.Command.Terms != item.AgreementID || op.ID != item.OperationID {
 		base.Kind = ResultRefused
+		base.Definitive = true
 		base.Error = ErrForeign.Error()
 		return base, ErrForeign
 	}
-	applyAt := payload.ApplyAt
-	if applyAt.IsZero() {
-		applyAt = a.clock()
-	}
-	result, err := a.Store.Apply(item.AgreementID, op, payload.Signature, applyAt)
+	// The receiver's clock is the service time. A caller-supplied ApplyAt
+	// cannot backdate a first application. Exact committed retries still
+	// return their historical result inside Store.Apply.
+	result, err := a.Store.Apply(item.AgreementID, op, payload.Signature, a.clock())
 	if a.DropNext {
 		a.DropNext = false
 		base.Kind = ResultUncertain
@@ -85,7 +87,23 @@ func classifyStore(base AuthenticatedResponse, result nex.Result, err error) (Au
 	}
 	base.Kind = ResultRefused
 	base.Error = err.Error()
+	base.Definitive = definitiveRefusal(err)
 	return base, err
+}
+
+func definitiveRefusal(err error) bool {
+	if err == nil || errors.Is(err, nex.ErrCommitUncertain) {
+		return false
+	}
+	if errors.Is(err, nexum.ErrTakeback) || errors.Is(err, nex.ErrProtocolStale) {
+		return true
+	}
+	switch err.Error() {
+	case "stale or foreign command", "nex: foreign operation", "invalid signature":
+		return true
+	default:
+		return false
+	}
 }
 
 // ProtocolAuthority submits exact signed protocol commands to nex.ProtocolStore.
@@ -93,6 +111,9 @@ type ProtocolAuthority struct {
 	Tenant   string
 	Store    *nex.ProtocolStore
 	DropNext bool
+	// Height is supplied by the receiving host. Without it only v1 commands
+	// can use the legacy sender-supplied height.
+	Height func() uint64
 }
 
 func (a *ProtocolAuthority) Apply(item OutboundItem) (AuthenticatedResponse, error) {
@@ -105,16 +126,23 @@ func (a *ProtocolAuthority) Apply(item OutboundItem) (AuthenticatedResponse, err
 	payload, err := DecodePayload(item.SignedObject)
 	if err != nil || payload.Kind != KindProtocol || payload.Command == nil {
 		base.Kind = ResultRefused
+		base.Definitive = true
 		base.Error = ErrItem.Error()
 		return base, ErrItem
 	}
 	cmd := *payload.Command
 	if cmd.ProtocolID != item.AgreementID || cmd.RequestID != item.OperationID {
 		base.Kind = ResultRefused
+		base.Definitive = true
 		base.Error = ErrForeign.Error()
 		return base, ErrForeign
 	}
-	head, err := a.Store.Apply(item.AgreementID, cmd, payload.Signature, payload.Height)
+	var head string
+	if a.Height == nil {
+		head, err = a.Store.ApplyV1(item.AgreementID, cmd, payload.Signature, payload.Height)
+	} else {
+		head, err = a.Store.Apply(item.AgreementID, cmd, payload.Signature, a.Height())
+	}
 	if a.DropNext {
 		a.DropNext = false
 		base.Kind = ResultUncertain
@@ -140,14 +168,10 @@ func (a *ProtocolAuthority) View(tenant, agreementID string) (ViewSnapshot, erro
 
 func classifyProtocol(a *ProtocolAuthority, base AuthenticatedResponse, head string, err error) (AuthenticatedResponse, error) {
 	if err == nil {
+		// This head belongs to the command that just committed. The latest
+		// protocol phase is a different fact and is available from View.
 		base.Kind = ResultAgreement
 		base.ReceiptHead = head
-		if v, viewErr := a.Store.View(base.AgreementID); viewErr == nil {
-			base.Phase = v.Phase
-			if v.Report != nil {
-				base.WorkOutcome = string(v.Report.Outcome)
-			}
-		}
 		return base, nil
 	}
 	if errors.Is(err, nex.ErrCommitUncertain) {
@@ -162,6 +186,7 @@ func classifyProtocol(a *ProtocolAuthority, base AuthenticatedResponse, head str
 	}
 	base.Kind = ResultRefused
 	base.Error = err.Error()
+	base.Definitive = definitiveRefusal(err)
 	return base, err
 }
 

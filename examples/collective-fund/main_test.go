@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/WillBeebe/nexum/examples/internal/lab"
+	"github.com/WillBeebe/nexum/v2/examples/internal/lab"
 	"testing"
 	"time"
 )

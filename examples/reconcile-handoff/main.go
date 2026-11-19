@@ -9,15 +9,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/WillBeebe/nexum/adapter"
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/adapter"
+	"github.com/WillBeebe/nexum/v2/nex"
 )
 
 func run() error {
+	return runTo(os.Stdout)
+}
+
+func runTo(out io.Writer) error {
 	parent, err := os.MkdirTemp("", "nex-reconcile-handoff-")
 	if err != nil {
 		return err
@@ -189,56 +194,102 @@ func run() error {
 		return fmt.Errorf("expected unknown effect: %w", err)
 	}
 
-	coord := &adapter.Coordinator{}
+	coordDir := filepath.Join(parent, "coordinator")
+	coord, err := adapter.OpenCoordinator(coordDir, key)
+	if err != nil {
+		return err
+	}
 	srcFence, err := coord.Issue("owner-a")
 	if err != nil {
 		return err
 	}
-	src := adapter.BindOwner("owner-a", srcFence, pAuth)
-	coord.RecordCheckpoint(final.Head)
-	outbox.StopAdmission()
+	src := adapter.BindCoordinatorOwner(coord, "owner-a", srcFence, pAuth)
+	if err = coord.RecordCheckpoint(final.Head); err != nil {
+		return err
+	}
+	if err = outbox.SealAdmission(srcFence.Generation); err != nil {
+		return err
+	}
+	reopenedOldOutbox, err := adapter.OpenOutbox(filepath.Join(parent, "outbox"), key)
+	if err != nil {
+		return err
+	}
+	if sealed, gen, err := reopenedOldOutbox.AdmissionSealed(); err != nil || !sealed || gen != srcFence.Generation {
+		return fmt.Errorf("expected durable sealed outbox at gen %d: sealed=%v gen=%d err=%v", srcFence.Generation, sealed, gen, err)
+	}
+	if err = reopenedOldOutbox.Enqueue(item); !errors.Is(err, adapter.ErrAdmissionStopped) {
+		return fmt.Errorf("expected reopened outbox to refuse admission: %v", err)
+	}
 	if _, err = coord.StopAndFence("owner-a"); err != nil {
 		return err
 	}
 	src.Deactivate()
+
+	reopenedCoord, err := adapter.OpenCoordinator(coordDir, key)
+	if err != nil {
+		return err
+	}
+	if _, err = reopenedCoord.Issue("owner-b"); !errors.Is(err, adapter.ErrActivation) {
+		return fmt.Errorf("expected duplicate issue after restart to fail: %v", err)
+	}
 	dstDir := filepath.Join(parent, "protocols-b")
-	if err = adapter.CopyPrivateDir(filepath.Join(parent, "protocols"), dstDir); err != nil {
+	if err = adapter.HandoffCoordinatorDir(reopenedCoord, filepath.Join(parent, "protocols"), dstDir); err != nil {
 		return err
 	}
-	if err = adapter.CopyPrivateDir(filepath.Join(parent, "outbox"), filepath.Join(parent, "outbox-b")); err != nil {
+	outboxBDir := filepath.Join(parent, "outbox-b")
+	if err = adapter.HandoffCoordinatorDir(reopenedCoord, filepath.Join(parent, "outbox"), outboxBDir); err != nil {
 		return err
 	}
-	if _, err = adapter.OpenOutbox(filepath.Join(parent, "outbox-b"), key); err != nil {
+	outboxB, err := adapter.OpenOutbox(outboxBDir, key)
+	if err != nil {
 		return err
+	}
+	if sealed, gen, err := outboxB.AdmissionSealed(); err != nil || !sealed || gen != srcFence.Generation {
+		return fmt.Errorf("expected copied outbox to remain sealed: sealed=%v gen=%d err=%v", sealed, gen, err)
+	}
+	if err = outboxB.Enqueue(item); !errors.Is(err, adapter.ErrAdmissionStopped) {
+		return fmt.Errorf("expected copied outbox to refuse admission before resume: %v", err)
 	}
 	dstStore, err := nex.OpenProtocolStore(dstDir, key)
 	if err != nil {
 		return err
 	}
-	dst, err := adapter.ActivateReplacement(coord, src, "owner-b", final.Head, &adapter.ProtocolAuthority{Tenant: "lab", Store: dstStore})
+	dst, err := adapter.ActivateCoordinatorReplacement(reopenedCoord, src, "owner-b", final.Head, &adapter.ProtocolAuthority{Tenant: "lab", Store: dstStore})
 	if err != nil {
 		return err
 	}
-	current, err := coord.Current()
+	current, err := reopenedCoord.Current()
 	if err != nil {
 		return err
+	}
+	if err = outboxB.ResumeAdmission(current.Generation); err != nil {
+		return err
+	}
+	if err = outboxB.ResumeAdmission(srcFence.Generation); !errors.Is(err, adapter.ErrActivation) {
+		return fmt.Errorf("expected stale generation resume to fail: %v", err)
+	}
+	sealedAfter, resumedGen, err := outboxB.AdmissionSealed()
+	if err != nil || sealedAfter || resumedGen != current.Generation {
+		return fmt.Errorf("expected resumed outbox at gen %d: sealed=%v gen=%d err=%v", current.Generation, sealedAfter, resumedGen, err)
 	}
 	_, oldErr := src.Submit(adapter.RoutingEnvelope{Item: item, Generation: srcFence.Generation}, srcFence)
 	if !errors.Is(oldErr, adapter.ErrFenced) {
 		return fmt.Errorf("old owner still writable: %v", oldErr)
 	}
 
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{
-		"example":            "reconcile-handoff",
-		"lock_status":        lock.Result.Status,
-		"same_retry_result":  lock.Result.Head == lock.ReceiptHead,
-		"protocol_phase":     final.Phase,
-		"work_succeeded":     adapter.WorkSucceeded(final),
-		"dissent_preserved":  final.Reviews[0].Review.Dissent,
-		"effect_unknown":     true,
-		"old_owner_rejected": errors.Is(oldErr, adapter.ErrFenced),
-		"new_owner_active":   dst.Active && dst.ID == "owner-b",
-		"fence_generation":   current.Generation,
+	return json.NewEncoder(out).Encode(map[string]any{
+		"example":              "reconcile-handoff",
+		"lock_status":          lock.Result.Status,
+		"same_retry_result":    lock.Result.Head == lock.ReceiptHead,
+		"protocol_phase":       final.Phase,
+		"work_succeeded":       adapter.WorkSucceeded(final),
+		"dissent_preserved":    final.Reviews[0].Review.Dissent,
+		"effect_unknown":       true,
+		"durable_coordinator":  true,
+		"old_owner_rejected":   errors.Is(oldErr, adapter.ErrFenced),
+		"new_owner_active":     dst.Active && dst.ID == "owner-b",
+		"fence_generation":     current.Generation,
+		"admission_generation": resumedGen,
 	})
 }
 

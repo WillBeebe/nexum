@@ -1,4 +1,4 @@
-module github.com/WillBeebe/nexum
+module github.com/WillBeebe/nexum/v2
 
 go 1.25.0
 

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/pow"
-	"github.com/WillBeebe/nexum/quarry/keccak"
+	"github.com/WillBeebe/nexum/v2/internal/pow"
+	"github.com/WillBeebe/nexum/v2/quarry/keccak"
 )
 
 // ReceiptCommitment carries no message plaintext or keys. A client holding

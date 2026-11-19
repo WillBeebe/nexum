@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/WillBeebe/nexum/internal/message"
+	"github.com/WillBeebe/nexum/v2/internal/message"
 )
 
 type Identity = message.Identity

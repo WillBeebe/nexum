@@ -1,7 +1,7 @@
 package nex_test
 
 import (
-	"github.com/WillBeebe/nexum/nex"
+	"github.com/WillBeebe/nexum/v2/nex"
 	"testing"
 	"time"
 )
@@ -45,6 +45,31 @@ func TestContractAuthorizationAndTerminalState(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+func TestConsentHistorySurvivesReject(t *testing.T) {
+	now := time.Now().UTC()
+	a, b := newIdentity(t), newIdentity(t)
+	c, err := nex.New("consent", publicOf(t, a), publicOf(t, b), 4, "scope", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Execute(a, "lock", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Execute(b, "agree", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Agreed() || c.Phase() != "agreed" {
+		t.Fatalf("agreed=%v phase=%s", c.Agreed(), c.Phase())
+	}
+	if err = c.Execute(b, "reject", "", now); err != nil {
+		t.Fatal(err)
+	}
+	history := c.ConsentHistory()
+	if c.Phase() != string(nex.StatusRejected) || !c.Agreed() || len(history) != 2 || history[0].Action != "agree" || history[1].Action != "reject" {
+		t.Fatalf("phase=%s agreed=%v history=%+v", c.Phase(), c.Agreed(), history)
+	}
+}
+
 func TestExpiry(t *testing.T) {
 	now := time.Now().UTC()
 	a, b := newIdentity(t), newIdentity(t)

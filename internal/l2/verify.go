@@ -3,8 +3,8 @@ package l2
 import (
 	"fmt"
 
-	"github.com/WillBeebe/nexum/internal/nexum"
-	"github.com/WillBeebe/nexum/internal/pow"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/pow"
 )
 
 // Verify independently re-derives a seal instead of trusting the
@@ -22,6 +22,23 @@ import (
 // for a full re-chain, 2 — and then the re-miner must burn a fresh
 // Search to make 3 true again. That is the "expensive to rewrite"
 // property, checked here without asking the sealer anything.
+//
+// ProfileReceiptChain is that guarantee. It is not a Paillier settlement proof.
+const ProfileReceiptChain = "receipt-chain"
+
+// ProfileSealedSettlement requires a public proof bundle. Verify does not
+// imply this profile.
+const ProfileSealedSettlement = "sealed-settlement"
+
+// VerifySealed checks a public proof bundle and nothing else. Missing proof
+// material is a refusal, not a downgrade to receipt-chain success.
+func VerifySealed(bundle nexum.SealedProofBundle) error {
+	if err := nexum.VerifySealedProofBundle(bundle); err != nil {
+		return fmt.Errorf("l2: sealed settlement: %w", err)
+	}
+	return nil
+}
+
 func Verify(as []*nexum.Agreement, h pow.Header, minBits int) error {
 	if h.DiffBits < minBits {
 		return fmt.Errorf("l2: verify: DiffBits %d below floor %d", h.DiffBits, minBits)

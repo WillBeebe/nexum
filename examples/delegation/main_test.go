@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/WillBeebe/nexum/examples/internal/lab"
+	"github.com/WillBeebe/nexum/v2/examples/internal/lab"
 	"sync"
 	"sync/atomic"
 	"testing"

@@ -4,13 +4,13 @@ package l2
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
-	"github.com/WillBeebe/nexum/internal/nexum"
-	"github.com/WillBeebe/nexum/internal/pow"
-	"github.com/WillBeebe/nexum/quarry/keccak"
+	"github.com/WillBeebe/nexum/v2/internal/nexum"
+	"github.com/WillBeebe/nexum/v2/internal/pow"
+	"github.com/WillBeebe/nexum/v2/quarry/keccak"
 )
 
 // Batch is one L2 window of agreements.
@@ -21,44 +21,75 @@ type Batch struct {
 
 // TermsDigest is the keccak commitment to an agreement's binding
 // terms — the economic facts, independent of the action trail.
-// Integrity requirement: the receipt chain proves what
-// happened but hashReceipt never saw the terms, so a sealed batch
-// could be re-chained with a different Amount and the old seal still
-// verified. The root therefore folds terms + receipt tail per
-// agreement.
+// Single source of truth: the economic terms live in the kernel's
+// Agreement.TermsDigest() (SHA-256, JSON-canonical); the L2 seal
+// re-commits to that exact digest under keccak, keeping the PoW domain
+// separate from the ledger domain. The two can no longer drift apart,
+// because there is only one field list.
 func TermsDigest(a *nexum.Agreement) ([32]byte, error) {
 	if a == nil {
 		return [32]byte{}, fmt.Errorf("l2: nil agreement")
 	}
-	st := keccak.NewLegacyKeccak256()
-	w := func(s string) {
-		_, _ = st.Write([]byte(s))
-		_, _ = st.Write([]byte{0}) // field separator, no ambiguities
+	kernel, err := hex.DecodeString(a.TermsDigest())
+	if err != nil || len(kernel) != 32 {
+		return [32]byte{}, fmt.Errorf("l2: invalid kernel terms digest")
 	}
-	w(a.ID)
-	w(a.Kind)
-	w(string(a.Buyer))
-	w(string(a.Seller))
-	w(strconv.FormatInt(a.Amount, 10))
-	w(fmt.Sprintf("%+v", a.Unit))
-	w(strconv.FormatFloat(a.Meter.CostUSD, 'f', -1, 64))
-	w(a.Meter.Effort)
-	w(strconv.FormatFloat(a.Meter.BudgetUSD, 'f', -1, 64))
-	w(strconv.Itoa(a.Meter.MaxSteps))
-	w(a.CreatedAt.UTC().Format(time.RFC3339Nano))
-	w(a.Deadline.UTC().Format(time.RFC3339Nano))
+	st := keccak.NewLegacyKeccak256()
+	_, _ = st.Write([]byte("nex/l2/v1/terms\x00"))
+	_, _ = st.Write(kernel)
 	var out [32]byte
 	copy(out[:], st.Sum(nil))
 	return out, nil
 }
 
-// Root is keccak over each agreement's terms digest and last receipt
-// hash, in order. Terms binding plus history binding: rewrite either
-// side and the root moves.
+// executionPolicyDigest binds the current operational policy separately from
+// the kernel's immutable terms. A policy can change during an agreement's
+// lifetime, but a previously sealed batch commits to its particular snapshot.
+func executionPolicyDigest(a *nexum.Agreement) ([32]byte, error) {
+	// v1 keeps second-or-snapshot deadline bytes exactly as sealed before.
+	// v2 commits canonical RFC3339Nano time plus the execution mode. A v1
+	// batch root must not move because a newer profile exists.
+	if a.Format >= nexum.FormatV2 {
+		b, err := json.Marshal(struct {
+			Deadline string      `json:"deadline"`
+			Meter    nexum.Meter `json:"meter"`
+			Mode     string      `json:"mode"`
+			Scheme   string      `json:"scheme"`
+		}{a.Deadline.UTC().Format(time.RFC3339Nano), a.Meter, a.Mode, a.Scheme})
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("l2: invalid execution policy: %w", err)
+		}
+		st := keccak.NewLegacyKeccak256()
+		_, _ = st.Write([]byte("nex/l2/v2/execution-policy\x00"))
+		_, _ = st.Write(b)
+		var out [32]byte
+		copy(out[:], st.Sum(nil))
+		return out, nil
+	}
+	b, err := json.Marshal(struct {
+		Deadline time.Time   `json:"deadline"`
+		Meter    nexum.Meter `json:"meter"`
+	}{a.Deadline.UTC(), a.Meter})
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("l2: invalid execution policy: %w", err)
+	}
+	st := keccak.NewLegacyKeccak256()
+	_, _ = st.Write([]byte("nex/l2/v1/execution-policy\x00"))
+	_, _ = st.Write(b)
+	var out [32]byte
+	copy(out[:], st.Sum(nil))
+	return out, nil
+}
+
+// Root is keccak over each agreement's terms digest, execution-policy digest,
+// and last receipt hash, in order. Rewriting any of these moves the root.
 func Root(as []*nexum.Agreement) ([32]byte, error) {
 	st := keccak.NewLegacyKeccak256()
+	if len(as) > 4096 {
+		return [32]byte{}, fmt.Errorf("l2: batch size out of bounds")
+	}
 	for _, a := range as {
-		if a == nil || len(a.Receipts) == 0 {
+		if a == nil || len(a.Receipts) == 0 || len(a.Receipts) > 128 {
 			return [32]byte{}, fmt.Errorf("l2: empty agreement")
 		}
 		if err := a.VerifyReceipts(); err != nil {
@@ -68,7 +99,12 @@ func Root(as []*nexum.Agreement) ([32]byte, error) {
 		if err != nil {
 			return [32]byte{}, err
 		}
+		policy, err := executionPolicyDigest(a)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		_, _ = st.Write(terms[:])
+		_, _ = st.Write(policy[:])
 		last := a.Receipts[len(a.Receipts)-1].Hash
 		raw, err := hex.DecodeString(last)
 		if err != nil {
