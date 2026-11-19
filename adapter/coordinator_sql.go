@@ -863,13 +863,21 @@ func (c *SQLCoordinator) checkAdmit(row sqlLeaseRow, fence Fence) error {
 // AuthorizeTx checks fence authority inside the caller's SQL transaction tx.
 // On PostgreSQL it locks the scope's lease row FOR SHARE, causing concurrent
 // StopAndFence calls (which lock FOR UPDATE) to wait until tx commits or rolls
-// back, and rejecting any tx after StopAndFence commits.
+// back, and rejecting any tx after StopAndFence commits. On SQLite it upgrades
+// tx to an immediate write lock on the lease row before checking fence state so
+// multi-connection / multi-process SQLite WAL callers achieve the same
+// linearizability against StopAndFence without mid-transaction lock-upgrade races.
 func (c *SQLCoordinator) AuthorizeTx(ctx context.Context, tx *sql.Tx, fence Fence, fn func(*sql.Tx) error) error {
 	if c == nil || tx == nil || fn == nil {
 		return ErrItem
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if c.dialect == DialectSQLite {
+		if _, err := tx.ExecContext(ctx, `UPDATE nex_fence_leases SET version = version WHERE scope = ?`, c.scope); err != nil {
+			return err
+		}
 	}
 	row, err := c.selectRowTx(ctx, tx, "FOR SHARE")
 	if errors.Is(err, sql.ErrNoRows) {

@@ -16,6 +16,7 @@ const PlanSignatureDomain = "coordination-plan/v1"
 
 const (
 	goalRecordVersion = 1
+	maxPlanPlanners   = 256
 	maxPlanTasks      = 64
 	maxPlanRevision   = 1 << 20
 )
@@ -45,7 +46,7 @@ func (s GoalSpec) ID() string {
 func (s GoalSpec) validate() error {
 	if !coordinationText(s.Nonce) || !coordinationText(s.Purpose) ||
 		!protocolHash(s.ConstraintsHash) || !protocolHash(s.CompletionPolicyHash) ||
-		len(s.Planners) == 0 || len(s.Planners) > 16 {
+		len(s.Planners) == 0 || len(s.Planners) > maxPlanPlanners {
 		return ErrGoalSpec
 	}
 	signers := make(map[string]bool, len(s.Planners))

@@ -192,3 +192,51 @@ func TestGoalStoreResendsAfterUncertainCommit(t *testing.T) {
 		t.Fatal(plan.Head, err)
 	}
 }
+
+func TestGoalSpecMultiPlannerScale(t *testing.T) {
+	planners := make([]Public, 0, 32)
+	for i := 0; i < 32; i++ {
+		id, err := NewIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := id.Public()
+		if err != nil {
+			t.Fatal(err)
+		}
+		planners = append(planners, pub)
+	}
+	spec := GoalSpec{
+		Nonce:                "multi-planner-32",
+		Purpose:              "coordinate 32 independent planners on one shared goal",
+		ConstraintsHash:      Hash("c"),
+		CompletionPolicyHash: Hash("p"),
+		Planners:             planners,
+	}
+	store, err := OpenGoalStore(filepath.Join(t.TempDir(), "goals"), bytes.Repeat([]byte{29}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(spec); err != nil {
+		t.Fatalf("32 planners should be accepted, got %v", err)
+	}
+
+	tooMany := make([]Public, 0, maxPlanPlanners+1)
+	for i := 0; i <= maxPlanPlanners; i++ {
+		id, err := NewIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := id.Public()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tooMany = append(tooMany, pub)
+	}
+	over := spec
+	over.Nonce = "multi-planner-over"
+	over.Planners = tooMany
+	if _, err := store.Create(over); !errors.Is(err, ErrGoalSpec) {
+		t.Fatalf("expected ErrGoalSpec above maxPlanPlanners=%d, got %v", maxPlanPlanners, err)
+	}
+}

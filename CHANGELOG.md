@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.1
+
+### Concurrency & multi-planner scale fixes
+
+- **`adapter.SQLCoordinator.AuthorizeTx` (SQLite WAL):** Upgrades the caller's
+  SQLite transaction to an immediate write lock on `nex_fence_leases` before
+  reading lease state (`UPDATE nex_fence_leases SET version = version WHERE
+  scope = ?`), matching PostgreSQL `FOR SHARE` / `FOR UPDATE` linearizability
+  against concurrent `StopAndFence` across multi-connection and multi-process
+  SQLite WAL callers without mid-transaction `SQLITE_BUSY` lock-upgrade races.
+- **`nex.GoalSpec` multi-planner scale:** Lifted the hardcoded 16-planner cap
+  in `GoalSpec.validate()` to `maxPlanPlanners = 256`, enabling large
+  multi-planner shared DAG goals while keeping serialized key payloads bounded.
+- Added `-race` regression tests `TestSQLCoordinatorSQLiteMultiConnLinearizability`
+  and `TestGoalSpecMultiPlannerScale`.
+
 ## v2.0.0
 
 ### Major module & protocol upgrades

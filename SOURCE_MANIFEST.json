@@ -1,7 +1,7 @@
 [
   {
     "path": "CHANGELOG.md",
-    "sha256": "2cdec8212973041f72e885696fa1ffcc48df47eb91b081b13d492fe9bd04e9f0"
+    "sha256": "d7042612f6b708b7f1c0996c3de01b454cf65ccf0249520c7c5c52c576a3e42b"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -21,7 +21,7 @@
   },
   {
     "path": "README.md",
-    "sha256": "1c1fd0146132e8aa3e6e51e53103c329776bccc5f93b5fe12b4fd0fbcb55dfc2"
+    "sha256": "c567864f84b1ccbbf7f7fc1e59ea727080ab18194221ec1181daea84e2c1336c"
   },
   {
     "path": "THIRD_PARTY.md",
@@ -37,7 +37,7 @@
   },
   {
     "path": "adapter/coordinator_sql.go",
-    "sha256": "905e6c2f53443cad5745a67501817d9d7b0ff59ee726212a0ee64dd67fde5d35"
+    "sha256": "ea38dd001ef704a7866ae483bd242aaa2d4f4d8cdf6097999f159612f500623e"
   },
   {
     "path": "adapter/coordinator_test.go",
@@ -109,7 +109,7 @@
   },
   {
     "path": "docs/INSTALL.md",
-    "sha256": "472eb482fc5d40fd25f38b4be83253b50683f2b2f2595c410217d0a4d29a7535"
+    "sha256": "e7a5fcaf888ff30fe921971fac21a759127a280d0db14a55d2dd163a6a5bdce1"
   },
   {
     "path": "docs/TECHNICAL_DESIGN.md",
@@ -117,7 +117,7 @@
   },
   {
     "path": "examples/README.md",
-    "sha256": "52fc4b3824b4f63d8358a2c99c6b7709adc0f282f4e6452f06bb4e40616592f9"
+    "sha256": "18f3ba3d64ed2c303be31e534858a34ea10cf90c8b5dcf1c6072804bffc9ba5c"
   },
   {
     "path": "examples/collective-fund/main.go",
@@ -389,11 +389,11 @@
   },
   {
     "path": "nex/coordination_plan.go",
-    "sha256": "b0b9c27be43addac7e1e999d229caa82391eae50554e8fa430a4ecf24c3d76f2"
+    "sha256": "a74da2e016c167ed5693679b355b0fc37e7d66312896739ecf3a5c4c8889b4e4"
   },
   {
     "path": "nex/coordination_plan_test.go",
-    "sha256": "c3c0920b6da2d7737baf17c13e781229ec836c66471449adce435372fbd86cda"
+    "sha256": "78ff18a558b36756a3535c1f93a3dd1795851c0439cb5aa2cfa2ccf069c4a679"
   },
   {
     "path": "nex/coordination_test.go",
@@ -493,7 +493,7 @@
   },
   {
     "path": "site/agents.md",
-    "sha256": "6bc17dd5da5891b982f19ad2cd2cd228ae5e3859b25745d722e1e1b5bac0e561"
+    "sha256": "6c65c08862e179728317d860037820f026bbf93ebd6b50c1ac66903515bb3a26"
   },
   {
     "path": "site/build.py",
@@ -509,7 +509,7 @@
   },
   {
     "path": "site/index.html",
-    "sha256": "e5b13c3be5f31e4267d9b64ce69b8ad72bfa262495e2cdc4e705a07376d492f0"
+    "sha256": "6db94f652af802c6c4e1fb6a55e88ba85abf19d2435ea9c4697235d5c359c2b3"
   },
   {
     "path": "site/site.js",

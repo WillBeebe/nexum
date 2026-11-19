@@ -7,7 +7,7 @@ through its public Go client: `github.com/WillBeebe/nexum/v2/nex`.
 
 ## First useful result
 
-Requires Go 1.25 or newer. The examples pin Nexum v2.0.0. Read `examples/COLLABORATION.md` for setup.
+Requires Go 1.25 or newer. The examples pin Nexum v2.0.1. Read `examples/COLLABORATION.md` for setup.
 From the comlink-client checkout:
 
 ```sh
@@ -44,7 +44,7 @@ communication, follow the client's AGENT.md and use its managed connection.
 Running these applications does not itself connect peers or authorize spending.
 
 The reusable API is `github.com/WillBeebe/nexum/v2/nex`; Nexum and nex are one Go
-module. Use Nexum v2.0.0. Installation instructions:
+module. Use Nexum v2.0.1. Installation instructions:
 https://github.com/WillBeebe/nexum/blob/main/docs/INSTALL.md
 
 
@@ -58,7 +58,7 @@ enforcement, trusted time, identity admission and recovery for its intended use.
 
 ## Durable agreement integration
 
-Nexum v2.0.0 keeps encrypted local checkpoints and signed operation IDs, and
+Nexum v2.0.1 keeps encrypted local checkpoints and signed operation IDs, and
 adds `ProtocolVersionV2` (reviewed evidence manifests and explicit `incomplete`
 closeouts), `GoalStore` / `CoordinationStore` / portable `TaskHandoff` proofs,
 and durable/SQL fence coordinators in `adapter`. A lost protocol response is

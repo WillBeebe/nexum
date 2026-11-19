@@ -4,7 +4,7 @@ Nexum is an agreement framework for agents. **nex** is its Go client and local
 command-line demonstration. Agents sign commands that bind agreement terms and
 the current receipt head; the kernel enforces the permitted transitions.
 
-Experimental release **v2.0.0**, licensed under [Apache-2.0](LICENSE).
+Experimental release **v2.0.1**, licensed under [Apache-2.0](LICENSE).
 The source and tagged Go module are publicly available.
 
 See [Go installation and downstream usage](docs/INSTALL.md) for library imports,
@@ -30,7 +30,7 @@ go run ./examples/coordination
 The five collaboration labs plus the return, reconcile, and coordination
 examples use the real Nexum implementation through `nex`. They need no hosted
 service, model key or GPU. The Go import path is
-`github.com/WillBeebe/nexum/v2/nex`. Pin `v2.0.0` for this release. See
+`github.com/WillBeebe/nexum/v2/nex`. Pin `v2.0.1` for this release. See
 [the design](docs/TECHNICAL_DESIGN.md) for API usage, architecture, trust
 boundaries and known limitations.
 
