@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"slices"
 	"sync"
 	"unicode/utf8"
@@ -163,7 +162,179 @@ func protocolHash(s string) bool {
 	b, e := hex.DecodeString(s)
 	return e == nil && len(b) == 32 && hex.EncodeToString(b) == s
 }
-func small(s string) bool { return len(s) > 0 && len(s) <= 4096 }
+func small(s string) bool { return len(s) > 0 && len(s) <= 4096 && utf8.ValidString(s) }
+
+func validNamedArtifactsUTF8(arts []NamedArtifact) bool {
+	for _, a := range arts {
+		if !utf8.ValidString(a.Name) || !utf8.ValidString(a.Ref.Digest) || !utf8.ValidString(a.Ref.MediaType) {
+			return false
+		}
+	}
+	return true
+}
+
+func validProtocolSpecUTF8(s ProtocolSpec) bool {
+	if !utf8.ValidString(s.Nonce) || !utf8.ValidString(s.Purpose) || !utf8.ValidString(s.IntendedOutcome) ||
+		!utf8.ValidString(s.Scope) || !utf8.ValidString(s.SpecificationHash) || !utf8.ValidString(s.AcceptanceHash) ||
+		!utf8.ValidString(s.FailurePolicyHash) || !utf8.ValidString(s.Initiator) || !utf8.ValidString(s.DissentPolicy) ||
+		!utf8.ValidString(s.TaskID) {
+		return false
+	}
+	for _, g := range s.Roles {
+		if !utf8.ValidString(g.ID) || !utf8.ValidString(g.Actor) || !utf8.ValidString(g.Label) ||
+			!utf8.ValidString(g.Scope) || !utf8.ValidString(g.LimitsHash) || !utf8.ValidString(g.EvidenceObligation) {
+			return false
+		}
+		for _, perm := range g.Permissions {
+			if !utf8.ValidString(string(perm)) {
+				return false
+			}
+		}
+	}
+	for _, r := range s.Resources {
+		if !utf8.ValidString(r.Resource) {
+			return false
+		}
+	}
+	for _, w := range s.RequiredWitnesses {
+		if !utf8.ValidString(w) {
+			return false
+		}
+	}
+	for _, a := range s.Return.SuccessArtifacts {
+		if !utf8.ValidString(a) {
+			return false
+		}
+	}
+	for _, a := range s.Return.FailureArtifacts {
+		if !utf8.ValidString(a) {
+			return false
+		}
+	}
+	for _, d := range s.Return.AllowedDisposition {
+		if !utf8.ValidString(d) {
+			return false
+		}
+	}
+	return true
+}
+
+func validProtocolCommandUTF8(c ProtocolCommand) bool {
+	if !utf8.ValidString(c.RequestID) || !utf8.ValidString(c.ProtocolID) || !utf8.ValidString(c.Head) ||
+		!utf8.ValidString(c.Actor) || !utf8.ValidString(c.GrantID) || !utf8.ValidString(c.Scope) ||
+		!utf8.ValidString(c.Action) {
+		return false
+	}
+	if c.Report != nil {
+		if !utf8.ValidString(string(c.Report.Outcome)) || !utf8.ValidString(c.Report.Stage) || !utf8.ValidString(c.Report.ReasonHash) {
+			return false
+		}
+		for _, ev := range c.Report.Evidence {
+			if !utf8.ValidString(ev) {
+				return false
+			}
+		}
+		for _, r := range c.Report.Resources {
+			if !utf8.ValidString(r.Resource) {
+				return false
+			}
+		}
+		for _, bc := range c.Report.BreachClaims {
+			if !utf8.ValidString(bc.Actor) || !utf8.ValidString(bc.EvidenceHash) {
+				return false
+			}
+		}
+		if c.Report.Manifest != nil {
+			if !utf8.ValidString(c.Report.Manifest.MethodHash) ||
+				!validNamedArtifactsUTF8(c.Report.Manifest.Inputs) ||
+				!validNamedArtifactsUTF8(c.Report.Manifest.Outputs) {
+				return false
+			}
+			for _, cl := range c.Report.Manifest.Claims {
+				if !utf8.ValidString(cl) {
+					return false
+				}
+			}
+		}
+	}
+	if c.Review != nil {
+		if !utf8.ValidString(c.Review.ReportHash) || !utf8.ValidString(c.Review.AssessmentHash) {
+			return false
+		}
+	}
+	if c.Resolution != nil {
+		if !utf8.ValidString(c.Resolution.ReportHash) || !utf8.ValidString(c.Resolution.Outcome) || !utf8.ValidString(c.Resolution.ReasonHash) {
+			return false
+		}
+	}
+	if c.Return != nil {
+		if !utf8.ValidString(c.Return.ResolutionHash) || !utf8.ValidString(c.Return.ReviewsHash) ||
+			!utf8.ValidString(c.Return.Uncertainty) || !utf8.ValidString(c.Return.Disposition) {
+			return false
+		}
+		for _, ev := range c.Return.Evidence {
+			if !utf8.ValidString(ev) {
+				return false
+			}
+		}
+		for _, r := range c.Return.Resources {
+			if !utf8.ValidString(r.Resource) {
+				return false
+			}
+		}
+		for _, sa := range c.Return.SafeAssumptions {
+			if !utf8.ValidString(sa) {
+				return false
+			}
+		}
+		for _, a := range c.Return.Artifacts {
+			if !utf8.ValidString(a.ID) || !utf8.ValidString(a.Commitment) || !utf8.ValidString(a.ReuseRestrictions) {
+				return false
+			}
+		}
+		for _, ss := range c.Return.SuccessorSpecs {
+			if !utf8.ValidString(ss) {
+				return false
+			}
+		}
+	}
+	if c.Incomplete != nil {
+		if !utf8.ValidString(c.Incomplete.ReasonHash) || !validNamedArtifactsUTF8(c.Incomplete.Artifacts) {
+			return false
+		}
+		for _, ev := range c.Incomplete.Evidence {
+			if !utf8.ValidString(ev) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sameResourceUse(a, b []ResourceUse) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	expected := make(map[string]ResourceUse, len(b))
+	for _, u := range b {
+		if _, dup := expected[u.Resource]; dup {
+			return false
+		}
+		expected[u.Resource] = u
+	}
+	seen := make(map[string]bool, len(a))
+	for _, u := range a {
+		want, ok := expected[u.Resource]
+		if !ok || seen[u.Resource] || u != want {
+			return false
+		}
+		seen[u.Resource] = true
+	}
+	return len(seen) == len(expected)
+}
 func uniqueStrings(ss []string, max int, valid func(string) bool) bool {
 	if len(ss) > max {
 		return false
@@ -189,7 +360,7 @@ func hasPermission(g RoleGrant, p ProtocolPermission) bool {
 	return false
 }
 func (s ProtocolSpec) validate() error {
-	if !small(s.Scope) {
+	if !validProtocolSpecUTF8(s) || !small(s.Scope) {
 		return ErrProtocolSpec
 	}
 	v2 := s.Version == ProtocolVersionV2
@@ -201,7 +372,7 @@ func (s ProtocolSpec) validate() error {
 			return ErrProtocolSpec
 		}
 	}
-	if v2 && (s.WorkByHeight < 2 || !validV2SpecText(s)) {
+	if v2 && s.WorkByHeight < 2 {
 		return ErrProtocolSpec
 	}
 	if s.DissentPolicy != "record" && s.DissentPolicy != "block" {
@@ -280,7 +451,7 @@ func (s ProtocolSpec) validate() error {
 		}
 		resources[r.Resource] = true
 	}
-	validID := func(v string) bool { return len(v) > 0 && len(v) <= 128 && (!v2 || utf8.ValidString(v)) }
+	validID := func(v string) bool { return len(v) > 0 && len(v) <= 128 && utf8.ValidString(v) }
 	if !uniqueStrings(s.Return.SuccessArtifacts, 32, validID) || !uniqueStrings(s.Return.FailureArtifacts, 32, validID) || len(s.Return.AllowedDisposition) == 0 || !uniqueStrings(s.Return.AllowedDisposition, 4, func(v string) bool { return v == "continue" || v == "retry" || v == "renegotiate" || v == "refuse" }) {
 		return ErrProtocolSpec
 	}
@@ -297,6 +468,9 @@ func NewProtocol(spec ProtocolSpec) (*Protocol, error) {
 		return nil, err
 	}
 	spec = cloneProtocol(spec)
+	if err := spec.validate(); err != nil {
+		return nil, err
+	}
 	id := Hash(spec)
 	return &Protocol{spec: spec, view: ProtocolView{ID: id, Head: id, Phase: "admission"}}, nil
 }
@@ -412,7 +586,7 @@ func validateReport(r WorkReport, s ProtocolSpec) error {
 	return nil
 }
 func validateReturn(m ReturnManifest, v ProtocolView, s ProtocolSpec) error {
-	if m.ResolutionHash != Hash(v.Resolution) || m.ReviewsHash != Hash(v.Reviews) || !small(m.Uncertainty) || len(m.SafeAssumptions) == 0 || !uniqueStrings(m.SafeAssumptions, 32, small) || !uniqueStrings(m.Evidence, 128, protocolHash) || !reflect.DeepEqual(m.Resources, v.Report.Resources) || len(m.Artifacts) > 64 {
+	if m.ResolutionHash != Hash(v.Resolution) || m.ReviewsHash != Hash(v.Reviews) || !small(m.Uncertainty) || len(m.SafeAssumptions) == 0 || !uniqueStrings(m.SafeAssumptions, 32, small) || !uniqueStrings(m.Evidence, 128, protocolHash) || !sameResourceUse(m.Resources, v.Report.Resources) || len(m.Artifacts) > 64 {
 		return ErrProtocolEvidence
 	}
 	evidence := map[string]bool{}
@@ -492,11 +666,21 @@ func commandShape(c ProtocolCommand) bool {
 func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !validProtocolCommandUTF8(c) || !commandShape(c) {
+		return "", ErrProtocolSpec
+	}
 	raw, err := json.Marshal(c)
-	if err != nil || len(raw) > 64<<10 || !commandShape(c) {
+	if err != nil || len(raw) > 64<<10 {
 		return "", ErrProtocolSpec
 	}
 	c = cloneProtocol(c)
+	if !validProtocolCommandUTF8(c) || !commandShape(c) {
+		return "", ErrProtocolSpec
+	}
+	raw, err = json.Marshal(c)
+	if err != nil || len(raw) > 64<<10 {
+		return "", ErrProtocolSpec
+	}
 	signature = append([]byte(nil), signature...)
 	actor, ok := p.public(c.Actor)
 	if !ok {
@@ -504,6 +688,9 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 	}
 	if err := Verify(actor, "protocol", c, signature); err != nil {
 		return "", err
+	}
+	if c.ProtocolID != p.view.ID {
+		return "", ErrProtocolStale
 	}
 	for _, e := range p.events {
 		if e.Command.Actor == c.Actor && e.Command.RequestID == c.RequestID {
@@ -513,7 +700,7 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 			return e.ReceiptHash, nil
 		}
 	}
-	if c.ProtocolID != p.view.ID || c.Head != p.view.Head || c.Height != height || height < p.view.Height {
+	if c.Head != p.view.Head || c.Height != height || height < p.view.Height {
 		return "", ErrProtocolStale
 	}
 	if err := p.authorize(c); err != nil {

@@ -338,17 +338,13 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 		for _, dep := range t.Dependencies {
 			depState, ok := states[dep.TaskID]
 			if !ok {
-				res, rerr := s.Result(goalID, dep.TaskID, dep.ProtocolID)
-				cacheMissValidations++
-				if rerr != nil {
-					ready = false
-					continue
+				if !seen[dep.TaskID] {
+					return nil, cacheMissValidations, ErrCorruptStore
 				}
-				if res.Head != dep.Head || res.Outcome != dep.Outcome ||
-					!slices.Contains(res.Artifacts, TaskArtifact{Slot: dep.Slot, Digest: dep.Digest}) {
-					ready = false
-					mismatch = true
-				}
+				// Pass 1 already locked and inspected dep.TaskID and observed it as
+				// unclaimed in this snapshot; do not redundantly call s.Result,
+				// inflate cacheMissValidations, swallow storage errors, or tear the snapshot.
+				ready = false
 				continue
 			}
 			res, found := depState.Results[dep.ProtocolID]

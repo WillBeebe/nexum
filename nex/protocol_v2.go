@@ -20,7 +20,7 @@ type ArtifactRef struct {
 }
 
 func (a ArtifactRef) Validate() error {
-	if !protocolHash(a.Digest) || a.Size >= math.MaxInt64 || len(a.MediaType) > 255 {
+	if !protocolHash(a.Digest) || a.Size >= math.MaxInt64 || len(a.MediaType) > 255 || !utf8.ValidString(a.MediaType) {
 		return ErrProtocolEvidence
 	}
 	mediaType, _, err := mime.ParseMediaType(a.MediaType)
@@ -84,20 +84,7 @@ func validNamedArtifacts(artifacts []NamedArtifact) bool {
 }
 
 func validV2SpecText(s ProtocolSpec) bool {
-	if !utf8.ValidString(s.Nonce) || !utf8.ValidString(s.Purpose) || !utf8.ValidString(s.IntendedOutcome) || !utf8.ValidString(s.Scope) {
-		return false
-	}
-	for _, g := range s.Roles {
-		if !utf8.ValidString(g.ID) || !utf8.ValidString(g.Label) {
-			return false
-		}
-	}
-	for _, r := range s.Resources {
-		if !utf8.ValidString(r.Resource) {
-			return false
-		}
-	}
-	return true
+	return validProtocolSpecUTF8(s)
 }
 
 func validateReportManifest(r WorkReport, s ProtocolSpec) error {

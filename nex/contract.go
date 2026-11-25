@@ -1,11 +1,13 @@
 package nex
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/WillBeebe/nexum/v2/internal/nexum"
 )
@@ -42,17 +44,34 @@ type Terms struct {
 }
 
 func New(kind string, buyer, seller Public, amount int64, spec any, now, deadline time.Time) (*Contract, error) {
+	if !utf8.ValidString(kind) || strings.ContainsRune(kind, 0) {
+		return nil, errors.New("nex: agreement kind must be valid UTF-8 without NUL bytes")
+	}
 	if err := buyer.Validate(); err != nil {
 		return nil, err
 	}
 	if err := seller.Validate(); err != nil {
 		return nil, err
 	}
+	if buyer.ID() == seller.ID() || bytes.Equal(buyer.Signing, seller.Signing) {
+		return nil, nexum.ErrSameParty
+	}
+	now = now.UTC()
+	deadline = deadline.UTC()
+	if _, err := now.MarshalJSON(); err != nil {
+		return nil, fmt.Errorf("contract timestamp: %w", err)
+	}
+	if _, err := deadline.MarshalJSON(); err != nil {
+		return nil, fmt.Errorf("contract deadline: %w", err)
+	}
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return nil, fmt.Errorf("contract specification: %w", err)
 	}
 	definition := Terms{kind, buyer.ID(), seller.ID(), amount, raw, now, deadline}
+	if _, err := json.Marshal(definition); err != nil {
+		return nil, fmt.Errorf("contract terms: %w", err)
+	}
 	id := Hash(definition)
 	a, err := nexum.OpenAgreement(id, kind, nexum.Party(buyer.ID()), nexum.Party(seller.ID()), amount, nexum.Meter{MaxSteps: 128}, now)
 	if err != nil {
@@ -180,7 +199,7 @@ func (c *Contract) rebuildConsent() {
 	agreed := false
 	for _, r := range c.agreement.Receipts {
 		switch {
-		case r.Action == "evidence" && strings.HasPrefix(r.Note, "signed-consent:"):
+		case r.Action == "evidence" && r.Actor == c.agreement.Seller && strings.HasPrefix(r.Note, "signed-consent:"):
 			c.consent = append(c.consent, ConsentEvent{Action: "agree", Head: r.Hash})
 			agreed = true
 		case r.Action == "reject" && agreed:

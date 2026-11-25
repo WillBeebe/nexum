@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -348,7 +349,10 @@ func (s *Store) read(id string) (storedContract, *Contract, error) {
 }
 
 func (r *storedContract) restore(id string) (*Contract, error) {
-	if r.Version != 1 || r.Buyer.Validate() != nil || r.Seller.Validate() != nil || !json.Valid(r.Terms.Spec) ||
+	if r.Version != 1 || r.Buyer.Validate() != nil || r.Seller.Validate() != nil ||
+		bytes.Equal(r.Buyer.Signing, r.Seller.Signing) ||
+		!utf8.ValidString(r.Terms.Kind) || strings.ContainsRune(r.Terms.Kind, 0) ||
+		!json.Valid(r.Terms.Spec) ||
 		Hash(r.Terms) != id || r.Terms.Buyer != r.Buyer.ID() || r.Terms.Seller != r.Seller.ID() || r.Operations == nil {
 		return nil, ErrCorruptStore
 	}
