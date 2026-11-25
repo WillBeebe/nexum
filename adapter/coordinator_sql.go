@@ -40,6 +40,7 @@ type SQLCoordinator struct {
 }
 
 var _ FenceCoordinator = (*SQLCoordinator)(nil)
+var _ HandoffReady = (*SQLCoordinator)(nil)
 
 type sqlLeaseRow struct {
 	version        int
@@ -114,6 +115,9 @@ func (c *SQLCoordinator) SetEpochSealer(sealer EpochSealer) {
 }
 
 func (c *SQLCoordinator) currentSealer() EpochSealer {
+	if c == nil {
+		return nil
+	}
 	c.cfgMu.RLock()
 	defer c.cfgMu.RUnlock()
 	return c.sealer
@@ -123,6 +127,10 @@ func (c *SQLCoordinator) initSchemaAndRow(ctx context.Context) error {
 	if c.dialect == DialectSQLite {
 		c.sqliteMu.Lock()
 		defer c.sqliteMu.Unlock()
+	}
+	genesisSealed, err := c.sealToken(0, "", nil)
+	if err != nil {
+		return err
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -156,7 +164,7 @@ func (c *SQLCoordinator) initSchemaAndRow(ctx context.Context) error {
 			`INSERT INTO nex_fence_leases (scope, version, state, generation, owner_id, token_sha256, sealed_token, admission, checkpoint_set, checkpoint_gen, checkpoint_head, fence_proof)
 			 VALUES ($1, $2, $3, 0, '', $4, $5, $6, FALSE, 0, '', FALSE)
 			 ON CONFLICT (scope) DO NOTHING`,
-			c.scope, Version, coordStateUnissued, []byte{}, []byte{}, coordAdmissionStopped,
+			c.scope, Version, coordStateUnissued, []byte{}, genesisSealed, coordAdmissionStopped,
 		); err != nil {
 			return err
 		}
@@ -183,7 +191,7 @@ func (c *SQLCoordinator) initSchemaAndRow(ctx context.Context) error {
 			`INSERT INTO nex_fence_leases (scope, version, state, generation, owner_id, token_sha256, sealed_token, admission, checkpoint_set, checkpoint_gen, checkpoint_head, fence_proof)
 			 VALUES (?, ?, ?, 0, '', ?, ?, ?, 0, 0, '', 0)
 			 ON CONFLICT (scope) DO NOTHING`,
-			c.scope, Version, coordStateUnissued, []byte{}, []byte{}, coordAdmissionStopped,
+			c.scope, Version, coordStateUnissued, []byte{}, genesisSealed, coordAdmissionStopped,
 		); err != nil {
 			return err
 		}
@@ -193,7 +201,7 @@ func (c *SQLCoordinator) initSchemaAndRow(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.validateRow(row, true); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -204,6 +212,9 @@ func (c *SQLCoordinator) tokenAAD(generation uint64, ownerID string) []byte {
 }
 
 func (c *SQLCoordinator) sealToken(generation uint64, ownerID string, token []byte) ([]byte, error) {
+	if c == nil || c.aead == nil {
+		return nil, ErrCorrupt
+	}
 	nonce := make([]byte, c.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
@@ -214,6 +225,9 @@ func (c *SQLCoordinator) sealToken(generation uint64, ownerID string, token []by
 }
 
 func (c *SQLCoordinator) openToken(row sqlLeaseRow) ([]byte, error) {
+	if c == nil || c.aead == nil {
+		return nil, ErrCorrupt
+	}
 	n := c.aead.NonceSize()
 	if len(row.sealedToken) < len(vaultHeader)+n+c.aead.Overhead() {
 		return nil, ErrCorrupt
@@ -227,6 +241,13 @@ func (c *SQLCoordinator) openToken(row sqlLeaseRow) ([]byte, error) {
 	if err != nil {
 		return nil, ErrCorrupt
 	}
+	if row.generation == 0 {
+		if len(plain) != 0 || len(row.tokenSHA256) != 0 {
+			clear(plain)
+			return nil, ErrCorrupt
+		}
+		return plain, nil
+	}
 	if len(plain) != 32 || len(row.tokenSHA256) != 32 {
 		clear(plain)
 		return nil, ErrCorrupt
@@ -239,7 +260,7 @@ func (c *SQLCoordinator) openToken(row sqlLeaseRow) ([]byte, error) {
 	return plain, nil
 }
 
-func (c *SQLCoordinator) validateRow(row sqlLeaseRow, verifyCiphertext bool) error {
+func (c *SQLCoordinator) validateRow(row sqlLeaseRow) error {
 	if row.version != Version {
 		return ErrVersion
 	}
@@ -250,7 +271,7 @@ func (c *SQLCoordinator) validateRow(row sqlLeaseRow, verifyCiphertext bool) err
 	}
 	switch row.state {
 	case coordStateUnissued:
-		if row.generation != 0 || row.ownerID != "" || len(row.tokenSHA256) != 0 || len(row.sealedToken) != 0 || row.fenceProof || row.admission != coordAdmissionStopped || row.checkpointSet {
+		if row.generation != 0 || row.ownerID != "" || len(row.tokenSHA256) != 0 || len(row.sealedToken) == 0 || row.fenceProof || row.admission != coordAdmissionStopped || row.checkpointSet {
 			return ErrCorrupt
 		}
 	case coordStateActive:
@@ -273,13 +294,11 @@ func (c *SQLCoordinator) validateRow(row sqlLeaseRow, verifyCiphertext bool) err
 			return ErrCorrupt
 		}
 	}
-	if verifyCiphertext && row.generation > 0 {
-		plain, err := c.openToken(row)
-		if err != nil {
-			return err
-		}
-		clear(plain)
+	plain, err := c.openToken(row)
+	if err != nil {
+		return err
 	}
+	clear(plain)
 	return nil
 }
 
@@ -365,7 +384,7 @@ func (c *SQLCoordinator) writeRowTx(ctx context.Context, tx *sql.Tx, row sqlLeas
 	if row.generation > uint64(math.MaxInt64) || row.checkpointGen > uint64(math.MaxInt64) {
 		return ErrGenerationOverflow
 	}
-	if err := c.validateRow(row, false); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return err
 	}
 	if c.dialect == DialectPostgres {
@@ -470,7 +489,7 @@ func (c *SQLCoordinator) withWriteTx(ctx context.Context, missingErr error, fn f
 	if err != nil {
 		return err
 	}
-	if err := c.validateRow(row, false); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return err
 	}
 	if err := fn(tx, row); err != nil {
@@ -539,7 +558,7 @@ func (c *SQLCoordinator) Current() (Fence, error) {
 	if err != nil {
 		return Fence{}, err
 	}
-	if err := c.validateRow(row, false); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return Fence{}, err
 	}
 	if row.state != coordStateActive || row.generation == 0 || row.ownerID == "" {
@@ -563,7 +582,7 @@ func (c *SQLCoordinator) Historical() (Fence, error) {
 	if err != nil {
 		return Fence{}, err
 	}
-	if err := c.validateRow(row, false); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return Fence{}, err
 	}
 	if row.state != coordStateFencedProven && row.state != coordStateFencedUnproven {
@@ -587,7 +606,7 @@ func (c *SQLCoordinator) Admission() string {
 	if err != nil {
 		return coordAdmissionStopped
 	}
-	if c.validateRow(row, false) != nil {
+	if c.validateRow(row) != nil {
 		return coordAdmissionStopped
 	}
 	if row.state == coordStateActive && row.admission == coordAdmissionOpen {
@@ -670,6 +689,9 @@ func (c *SQLCoordinator) StopAndFence(owner string) (Fence, error) {
 }
 
 func (c *SQLCoordinator) StopAndFenceContext(ctx context.Context, owner string) (Fence, error) {
+	if c == nil || c.db == nil {
+		return Fence{}, ErrFenced
+	}
 	if err := validateID(owner); err != nil {
 		return Fence{}, err
 	}
@@ -754,6 +776,9 @@ func (c *SQLCoordinator) ConfirmFenceProof(owner string) error {
 }
 
 func (c *SQLCoordinator) ConfirmFenceProofContext(ctx context.Context, owner string) error {
+	if c == nil || c.db == nil {
+		return ErrActivation
+	}
 	if err := validateID(owner); err != nil {
 		return err
 	}
@@ -844,7 +869,7 @@ func (c *SQLCoordinator) Activate(newOwner, observedHead string) (Fence, error) 
 }
 
 func (c *SQLCoordinator) checkAdmit(row sqlLeaseRow, fence Fence) error {
-	if err := c.validateRow(row, false); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return err
 	}
 	if row.state != coordStateActive || row.generation == 0 || len(row.tokenSHA256) != 32 {
@@ -897,36 +922,27 @@ func (c *SQLCoordinator) Authorize(fence Fence, fn func() error) error {
 		return ErrItem
 	}
 	ctx := context.Background()
-	if c.dialect == DialectPostgres {
-		tx, err := c.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if err := c.AuthorizeTx(ctx, tx, fence, func(_ *sql.Tx) error {
-			return fn()
-		}); err != nil {
-			return err
-		}
-		return tx.Commit()
+	if c.dialect == DialectSQLite {
+		c.sqliteMu.Lock()
+		defer c.sqliteMu.Unlock()
 	}
-
-	c.sqliteMu.Lock()
-	defer c.sqliteMu.Unlock()
-	row, err := c.selectRowDB(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrFenced
-	}
+	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := c.checkAdmit(row, fence); err != nil {
+	defer tx.Rollback()
+	if err := c.AuthorizeTx(ctx, tx, fence, func(_ *sql.Tx) error {
+		return fn()
+	}); err != nil {
 		return err
 	}
-	return fn()
+	return tx.Commit()
 }
 
-func (c *SQLCoordinator) readyForHandoff() error {
+// ReadyForHandoff reports whether this coordinator is fenced with proof,
+// stopped for admission, and holding a non-empty checkpoint head for the
+// fenced generation.
+func (c *SQLCoordinator) ReadyForHandoff() error {
 	if c == nil || c.db == nil {
 		return ErrActivation
 	}
@@ -941,7 +957,7 @@ func (c *SQLCoordinator) readyForHandoff() error {
 	if err != nil {
 		return err
 	}
-	if err := c.validateRow(row, true); err != nil {
+	if err := c.validateRow(row); err != nil {
 		return err
 	}
 	if row.state != coordStateFencedProven || !row.fenceProof || row.admission != coordAdmissionStopped {

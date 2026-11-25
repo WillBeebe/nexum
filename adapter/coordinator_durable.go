@@ -52,6 +52,7 @@ type DurableCoordinator struct {
 }
 
 var _ FenceCoordinator = (*DurableCoordinator)(nil)
+var _ HandoffReady = (*DurableCoordinator)(nil)
 
 // OpenCoordinator opens or initializes a durable coordinator in dir encrypted
 // under the 32-byte key. Reopening an existing directory restores its exact
@@ -390,7 +391,32 @@ func (c *DurableCoordinator) StopAndFenceContext(ctx context.Context, owner stri
 		ctx = context.Background()
 	}
 	scope, sealer := c.sealerConfig()
-	var out Fence
+	if sealer == nil {
+		var out Fence
+		err := c.withLock(func() error {
+			rec, err := c.readLocked()
+			if err != nil {
+				return err
+			}
+			if rec.State != coordStateActive || rec.Generation == 0 || rec.OwnerID != owner {
+				return ErrFenced
+			}
+			rec.Admission = coordAdmissionStopped
+			rec.State = coordStateFencedProven
+			rec.FenceProof = true
+			if err := c.writeLocked(rec); err != nil {
+				return err
+			}
+			out = fenceFromRecord(rec)
+			return nil
+		})
+		return out, err
+	}
+
+	var (
+		fencedGen uint64
+		out       Fence
+	)
 	err := c.withLock(func() error {
 		rec, err := c.readLocked()
 		if err != nil {
@@ -400,25 +426,43 @@ func (c *DurableCoordinator) StopAndFenceContext(ctx context.Context, owner stri
 			return ErrFenced
 		}
 		rec.Admission = coordAdmissionStopped
-		if sealer != nil {
-			rec.State = coordStateFencedUnproven
-			rec.FenceProof = false
-			if err := c.writeLocked(rec); err != nil {
-				return err
-			}
-			if err := sealer.SealFenceEpoch(ctx, scope, rec.Generation); err != nil {
-				return err
-			}
-		}
-		rec.State = coordStateFencedProven
-		rec.FenceProof = true
+		rec.State = coordStateFencedUnproven
+		rec.FenceProof = false
 		if err := c.writeLocked(rec); err != nil {
 			return err
 		}
+		fencedGen = rec.Generation
 		out = fenceFromRecord(rec)
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return Fence{}, err
+	}
+	if err := sealer.SealFenceEpoch(ctx, scope, fencedGen); err != nil {
+		return Fence{}, err
+	}
+	err = c.withLock(func() error {
+		rec, err := c.readLocked()
+		if err != nil {
+			return err
+		}
+		if rec.Generation != fencedGen || rec.OwnerID != owner {
+			return ErrFenced
+		}
+		if rec.State == coordStateFencedProven && rec.FenceProof {
+			return nil
+		}
+		if rec.State != coordStateFencedUnproven {
+			return ErrFenced
+		}
+		rec.State = coordStateFencedProven
+		rec.FenceProof = true
+		return c.writeLocked(rec)
+	})
+	if err != nil {
+		return Fence{}, err
+	}
+	return out, nil
 }
 
 // ConfirmFenceProof completes epoch sealing for an unproven fenced generation
@@ -437,8 +481,11 @@ func (c *DurableCoordinator) ConfirmFenceProofContext(ctx context.Context, owner
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	scope, sealer := c.sealerConfig()
-	return c.withLock(func() error {
+	var (
+		gen           uint64
+		alreadyProven bool
+	)
+	err := c.withLock(func() error {
 		rec, err := c.readLocked()
 		if err != nil {
 			return err
@@ -447,15 +494,36 @@ func (c *DurableCoordinator) ConfirmFenceProofContext(ctx context.Context, owner
 			return ErrActivation
 		}
 		if rec.State == coordStateFencedProven && rec.FenceProof {
+			alreadyProven = true
 			return nil
 		}
 		if rec.State != coordStateFencedUnproven {
 			return ErrActivation
 		}
-		if sealer != nil {
-			if err := sealer.SealFenceEpoch(ctx, scope, rec.Generation); err != nil {
-				return err
-			}
+		gen = rec.Generation
+		return nil
+	})
+	if err != nil || alreadyProven {
+		return err
+	}
+	if scope, sealer := c.sealerConfig(); sealer != nil {
+		if err := sealer.SealFenceEpoch(ctx, scope, gen); err != nil {
+			return err
+		}
+	}
+	return c.withLock(func() error {
+		rec, err := c.readLocked()
+		if err != nil {
+			return err
+		}
+		if rec.Generation != gen || rec.OwnerID != owner || rec.Admission != coordAdmissionStopped {
+			return ErrActivation
+		}
+		if rec.State == coordStateFencedProven && rec.FenceProof {
+			return nil
+		}
+		if rec.State != coordStateFencedUnproven {
+			return ErrActivation
 		}
 		rec.State = coordStateFencedProven
 		rec.FenceProof = true
@@ -543,7 +611,10 @@ func (c *DurableCoordinator) Authorize(fence Fence, fn func() error) error {
 	})
 }
 
-func (c *DurableCoordinator) readyForHandoff() error {
+// ReadyForHandoff reports whether this coordinator is fenced with proof,
+// stopped for admission, and holding a non-empty checkpoint head for the
+// fenced generation.
+func (c *DurableCoordinator) ReadyForHandoff() error {
 	if c == nil || c.vault == nil {
 		return ErrActivation
 	}

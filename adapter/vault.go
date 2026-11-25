@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -67,12 +68,19 @@ func (v *vault) path(id string) string { return filepath.Join(v.dir, id+".box") 
 func (v *vault) namedPath(filename string) string { return filepath.Join(v.dir, filename) }
 
 func recordID(tenant, operationID string) string {
-	sum := sha256.Sum256([]byte(tenant + "\x00" + operationID))
-	return hex.EncodeToString(sum[:])
+	mac := sha256.New()
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(tenant)))
+	mac.Write(n[:])
+	mac.Write([]byte(tenant))
+	binary.BigEndian.PutUint32(n[:], uint32(len(operationID)))
+	mac.Write(n[:])
+	mac.Write([]byte(operationID))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func validateID(id string) error {
-	if len(id) < 1 || len(id) > 128 || strings.TrimSpace(id) != id || !utf8.ValidString(id) || strings.ContainsAny(id, "/\\") {
+	if len(id) < 1 || len(id) > 128 || strings.TrimSpace(id) != id || !utf8.ValidString(id) || strings.ContainsAny(id, "/\\\x00") {
 		return ErrItem
 	}
 	return nil
@@ -82,7 +90,7 @@ func validateVaultFilename(filename string) error {
 	if len(filename) < 1 || len(filename) > 200 || strings.TrimSpace(filename) != filename || !utf8.ValidString(filename) {
 		return ErrItem
 	}
-	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") || strings.HasPrefix(filename, ".pending-") || strings.HasSuffix(filename, ".lock") {
+	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\\x00") || strings.HasPrefix(filename, ".pending-") || strings.HasSuffix(filename, ".lock") {
 		return ErrItem
 	}
 	return nil
@@ -155,32 +163,40 @@ func (v *vault) read(id string, dest any) error {
 	return v.readNamed(id+".box", vaultHeader+"/"+id, dest)
 }
 
-func (v *vault) readNamed(filename, aad string, dest any) error {
+func (v *vault) readNamedBytes(filename, aad string) ([]byte, error) {
 	if err := validateVaultFilename(filename); err != nil || aad == "" {
-		return ErrItem
+		return nil, ErrItem
 	}
 	f, err := os.Open(v.namedPath(filename))
 	if errors.Is(err, os.ErrNotExist) {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxRecord+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	n := v.aead.NonceSize()
 	if len(data) > maxRecord || len(data) < len(vaultHeader)+n+v.aead.Overhead() {
-		return ErrCorrupt
+		return nil, ErrCorrupt
 	}
 	if string(data[:len(vaultHeader)]) != vaultHeader {
-		return ErrVersion
+		return nil, ErrVersion
 	}
 	plain, err := v.aead.Open(nil, data[len(vaultHeader):len(vaultHeader)+n], data[len(vaultHeader)+n:], []byte(aad))
 	if err != nil {
-		return ErrCorrupt
+		return nil, ErrCorrupt
+	}
+	return plain, nil
+}
+
+func (v *vault) readNamed(filename, aad string, dest any) error {
+	plain, err := v.readNamedBytes(filename, aad)
+	if err != nil {
+		return err
 	}
 	defer clear(plain)
 	if json.Unmarshal(plain, dest) != nil {
@@ -239,34 +255,79 @@ func CopyPrivateDir(src, dst string) error {
 	if err = requirePrivateDir(srcInfo); err != nil {
 		return err
 	}
+	srcReal, err := filepath.EvalSymlinks(srcAbs)
+	if err != nil {
+		return err
+	}
 	created := false
 	dstInfo, err := os.Lstat(dstAbs)
 	if err == nil {
 		if err = requirePrivateDir(dstInfo); err != nil {
 			return err
 		}
+		if os.SameFile(srcInfo, dstInfo) {
+			return ErrStorageDir
+		}
+		dstReal, rerr := filepath.EvalSymlinks(dstAbs)
+		if rerr != nil {
+			return rerr
+		}
+		if dstReal == srcReal || isSubpath(srcReal, dstReal) || isSubpath(dstReal, srcReal) {
+			return ErrStorageDir
+		}
+		dstEntries, rerr := os.ReadDir(dstAbs)
+		if rerr != nil {
+			return rerr
+		}
+		if len(dstEntries) != 0 {
+			return ErrStorageDir
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	} else {
+		if dstParentReal, rerr := filepath.EvalSymlinks(filepath.Dir(dstAbs)); rerr == nil {
+			candDstReal := filepath.Join(dstParentReal, filepath.Base(dstAbs))
+			if candDstReal == srcReal || isSubpath(srcReal, candDstReal) || isSubpath(candDstReal, srcReal) {
+				return ErrStorageDir
+			}
+		}
+	}
+	entries, err := os.ReadDir(srcAbs)
+	if err != nil {
+		return err
+	}
+	var toCopy []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.Type()&os.ModeSymlink != 0 {
+			return ErrStorageDir
+		}
+		if strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		// A subdirectory or a temp file means this tree is not a finished flat copy.
+		if strings.HasPrefix(name, ".pending-") || e.IsDir() || !e.Type().IsRegular() {
+			return ErrStorageDir
+		}
+		toCopy = append(toCopy, name)
+	}
+	if dstInfo == nil {
 		if err = os.Mkdir(dstAbs, 0700); err != nil {
 			return err
 		}
 		created = true
 		dstInfo, err = os.Lstat(dstAbs)
 		if err != nil {
+			os.Remove(dstAbs)
 			return err
 		}
 		if err = requirePrivateDir(dstInfo); err != nil {
 			os.Remove(dstAbs)
 			return err
 		}
-	}
-	entries, err := os.ReadDir(srcAbs)
-	if err != nil {
-		if created {
-			os.Remove(dstAbs)
+		if os.SameFile(srcInfo, dstInfo) {
+			return ErrStorageDir
 		}
-		return err
 	}
 	var names []string
 	want := map[string][32]byte{}
@@ -274,16 +335,12 @@ func CopyPrivateDir(src, dst string) error {
 		cleanupCopy(dstAbs, created, names)
 		return cause
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.Type()&os.ModeSymlink != 0 {
-			return fail(ErrStorageDir)
+	for _, name := range toCopy {
+		info, err := os.Lstat(filepath.Join(srcAbs, name))
+		if err != nil {
+			return fail(err)
 		}
-		if strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		// A subdirectory or a temp file means this tree is not a finished flat copy.
-		if strings.HasPrefix(name, ".pending-") || e.IsDir() || !e.Type().IsRegular() {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return fail(ErrStorageDir)
 		}
 		in, err := os.ReadFile(filepath.Join(srcAbs, name))
@@ -303,6 +360,14 @@ func CopyPrivateDir(src, dst string) error {
 		return fail(err)
 	}
 	return nil
+}
+
+func isSubpath(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil || rel == "." {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func requirePrivateDir(info os.FileInfo) error {

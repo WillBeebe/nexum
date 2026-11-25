@@ -74,12 +74,13 @@ func (o *Outbox) StopAdmission() {
 	if o == nil {
 		return
 	}
-	o.setStopped(true)
 	if o.vault == nil {
+		o.setStopped(true)
 		return
 	}
 	_ = o.vault.withLock(func() error {
-		gate, err := o.readAdmissionGateLocked()
+		o.setStopped(true)
+		gate, _, err := o.readAdmissionGateLocked()
 		if err != nil {
 			return err
 		}
@@ -95,18 +96,24 @@ func (o *Outbox) SealAdmission(generation uint64) error {
 	if o == nil || o.vault == nil {
 		return ErrItem
 	}
-	o.setStopped(true)
 	return o.vault.withLock(func() error {
-		gate, err := o.readAdmissionGateLocked()
+		gate, exists, err := o.readAdmissionGateLocked()
 		if err != nil {
 			return err
 		}
 		if generation < gate.Generation {
+			if exists {
+				o.setStopped(gate.Stopped)
+			}
 			return ErrActivation
 		}
 		gate.Stopped = true
 		gate.Generation = generation
-		return o.writeAdmissionGateLocked(gate)
+		if err := o.writeAdmissionGateLocked(gate); err != nil {
+			return err
+		}
+		o.setStopped(true)
+		return nil
 	})
 }
 
@@ -117,11 +124,14 @@ func (o *Outbox) ResumeAdmission(generation uint64) error {
 		return ErrItem
 	}
 	return o.vault.withLock(func() error {
-		gate, err := o.readAdmissionGateLocked()
+		gate, exists, err := o.readAdmissionGateLocked()
 		if err != nil {
 			return err
 		}
 		if generation < gate.Generation {
+			if exists {
+				o.setStopped(gate.Stopped)
+			}
 			return ErrActivation
 		}
 		gate.Stopped = false
@@ -145,11 +155,16 @@ func (o *Outbox) AdmissionSealed() (bool, uint64, error) {
 		gen    uint64
 	)
 	err := o.vault.withLock(func() error {
-		gate, err := o.readAdmissionGateLocked()
+		gate, exists, err := o.readAdmissionGateLocked()
 		if err != nil {
 			return err
 		}
-		sealed = o.admissionStopped() || gate.Stopped
+		if exists {
+			o.setStopped(gate.Stopped)
+			sealed = gate.Stopped
+		} else {
+			sealed = o.admissionStopped()
+		}
 		gen = gate.Generation
 		return nil
 	})
@@ -159,19 +174,19 @@ func (o *Outbox) AdmissionSealed() (bool, uint64, error) {
 	return sealed, gen, nil
 }
 
-func (o *Outbox) readAdmissionGateLocked() (admissionGateRecord, error) {
+func (o *Outbox) readAdmissionGateLocked() (admissionGateRecord, bool, error) {
 	var gate admissionGateRecord
 	err := o.vault.readNamed(admissionGateFile, admissionGateAAD, &gate)
 	if errors.Is(err, ErrNotFound) {
-		return admissionGateRecord{Version: Version}, nil
+		return admissionGateRecord{Version: Version}, false, nil
 	}
 	if err != nil {
-		return admissionGateRecord{}, err
+		return admissionGateRecord{}, false, err
 	}
 	if gate.Version != Version {
-		return admissionGateRecord{}, ErrVersion
+		return admissionGateRecord{}, false, ErrVersion
 	}
-	return gate, nil
+	return gate, true, nil
 }
 
 func (o *Outbox) writeAdmissionGateLocked(gate admissionGateRecord) error {
@@ -186,20 +201,25 @@ func (o *Outbox) admissionStopped() bool {
 }
 
 func (o *Outbox) Enqueue(item OutboundItem) error {
+	if o == nil || o.vault == nil {
+		return ErrItem
+	}
 	if err := validateItem(item); err != nil {
 		return err
 	}
 	item.Retry = item.Retry.normalized()
 	id := recordID(item.Tenant, item.OperationID)
 	return o.vault.withLock(func() error {
-		if o.admissionStopped() {
-			return ErrAdmissionStopped
-		}
-		gate, err := o.readAdmissionGateLocked()
+		gate, exists, err := o.readAdmissionGateLocked()
 		if err != nil {
 			return err
 		}
-		if gate.Stopped {
+		if exists {
+			o.setStopped(gate.Stopped)
+			if gate.Stopped {
+				return ErrAdmissionStopped
+			}
+		} else if o.admissionStopped() {
 			return ErrAdmissionStopped
 		}
 		var existing itemRecord
@@ -208,7 +228,10 @@ func (o *Outbox) Enqueue(item OutboundItem) error {
 			if existing.Item.Tenant != item.Tenant {
 				return ErrTenant
 			}
-			if !bytes.Equal(existing.Item.SignedObject, item.SignedObject) {
+			if !bytes.Equal(existing.Item.SignedObject, item.SignedObject) ||
+				existing.Item.AgreementID != item.AgreementID ||
+				existing.Item.Destination != item.Destination ||
+				existing.Item.Kind != item.Kind {
 				return ErrConflict
 			}
 			return nil
@@ -314,22 +337,19 @@ func (o *Outbox) Unresolved(tenant string) ([]RecordedItem, error) {
 // ReconcileDue resubmits only when backoff has elapsed. Explicit Reconcile
 // still retries immediately so an operator can force reconciliation.
 func (o *Outbox) ReconcileDue(tenant, operationID string, auth Authority) (AuthenticatedResponse, error) {
-	rec, err := o.Get(tenant, operationID)
-	if err != nil {
-		return AuthenticatedResponse{}, err
-	}
-	if terminalOutbox(rec.Status) {
-		return o.Reconcile(tenant, operationID, auth)
-	}
-	if !rec.NextTry.IsZero() && o.now().Before(rec.NextTry) {
-		return AuthenticatedResponse{}, ErrNotDue
-	}
-	return o.Reconcile(tenant, operationID, auth)
+	return o.reconcile(tenant, operationID, auth, true)
 }
 
 // Reconcile resubmits the identical signed bytes. It never calls Prepare.
 func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (AuthenticatedResponse, error) {
+	return o.reconcile(tenant, operationID, auth, false)
+}
+
+func (o *Outbox) reconcile(tenant, operationID string, auth Authority, enforceDue bool) (AuthenticatedResponse, error) {
 	var resp AuthenticatedResponse
+	if o == nil || o.vault == nil || auth == nil {
+		return resp, ErrItem
+	}
 	if err := validateID(tenant); err != nil {
 		return resp, err
 	}
@@ -361,15 +381,18 @@ func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (Authenti
 			}
 			return ErrDefinitive
 		}
+		if enforceDue && !stored.NextTry.IsZero() && o.now().Before(stored.NextTry) {
+			return ErrNotDue
+		}
 		got, err := auth.Apply(stored.Item)
 		stored.Attempts++
 		stored.NextTry = o.now().Add(backoff(stored.Item.Retry, stored.Attempts))
 		if err != nil {
 			stored.Status = statusFor(got, err)
+			stored.Candidate = nil
 			if terminalOutbox(stored.Status) {
 				copy := got
 				stored.Original = &copy
-				stored.Candidate = nil
 				stored.NextTry = time.Time{}
 			}
 			if writeErr := o.vault.write(id, stored); writeErr != nil {
@@ -398,6 +421,15 @@ func (o *Outbox) Reconcile(tenant, operationID string, auth Authority) (Authenti
 			}
 			resp = got
 			return ErrConflict
+		}
+		if !validCandidate(stored.Item, got) {
+			stored.Status = StatusUnknown
+			stored.Candidate = nil
+			if writeErr := o.vault.write(id, stored); writeErr != nil {
+				return writeErr
+			}
+			resp = got
+			return ErrResponse
 		}
 		copy := got
 		stored.Candidate = &copy
@@ -544,10 +576,37 @@ func validateItem(item OutboundItem) error {
 	if len(item.SignedObject) == 0 || len(item.SignedObject) > 64<<10 {
 		return ErrItem
 	}
-	if _, err := DecodePayload(item.SignedObject); err != nil {
+	payload, err := DecodePayload(item.SignedObject)
+	if err != nil {
 		return err
 	}
+	if payload.Kind != item.Kind {
+		return ErrItem
+	}
+	switch item.Kind {
+	case KindAgreement:
+		if payload.Operation == nil || payload.Operation.ID != item.OperationID || payload.Operation.Command.Terms != item.AgreementID {
+			return ErrItem
+		}
+	case KindProtocol:
+		if payload.Command == nil || payload.Command.RequestID != item.OperationID || payload.Command.ProtocolID != item.AgreementID {
+			return ErrItem
+		}
+	}
 	return nil
+}
+
+func validCandidate(item OutboundItem, resp AuthenticatedResponse) bool {
+	if resp.Version != Version || resp.Kind != ResultAgreement || resp.Error != "" {
+		return false
+	}
+	if resp.Tenant != item.Tenant || resp.AgreementID != item.AgreementID || resp.RequestID != item.OperationID {
+		return false
+	}
+	if resp.CommandHash != CommandHash(item.SignedObject) {
+		return false
+	}
+	return responseMatchesKind(item.Kind, resp)
 }
 
 func terminalOutbox(status string) bool {
@@ -581,7 +640,7 @@ func validateStored(stored itemRecord) error {
 			}
 		}
 	}
-	if stored.Status == StatusAwaiting && stored.Candidate != nil && stored.Candidate.Error != "" {
+	if stored.Status == StatusAwaiting && (stored.Candidate == nil || !validCandidate(stored.Item, *stored.Candidate)) {
 		return ErrCorrupt
 	}
 	return nil
@@ -599,7 +658,17 @@ func responseMatchesKind(kind Kind, resp AuthenticatedResponse) bool {
 }
 
 func sameTerminal(a, b AuthenticatedResponse) bool {
-	if a.Kind != b.Kind || a.ReceiptHead != b.ReceiptHead || a.RequestID != b.RequestID || a.AgreementID != b.AgreementID || a.Error != b.Error {
+	if a.Version != b.Version ||
+		a.Tenant != b.Tenant ||
+		a.AgreementID != b.AgreementID ||
+		a.RequestID != b.RequestID ||
+		a.CommandHash != b.CommandHash ||
+		a.Kind != b.Kind ||
+		a.ReceiptHead != b.ReceiptHead ||
+		a.Phase != b.Phase ||
+		a.WorkOutcome != b.WorkOutcome ||
+		a.Error != b.Error ||
+		a.Definitive != b.Definitive {
 		return false
 	}
 	if (a.Result == nil) != (b.Result == nil) {

@@ -30,6 +30,12 @@ func (a *StoreAuthority) Apply(item OutboundItem) (AuthenticatedResponse, error)
 		base.Error = ErrTenant.Error()
 		return base, ErrTenant
 	}
+	if item.Kind != KindAgreement {
+		base.Kind = ResultRefused
+		base.Definitive = true
+		base.Error = ErrItem.Error()
+		return base, ErrItem
+	}
 	payload, err := DecodePayload(item.SignedObject)
 	if err != nil || payload.Kind != KindAgreement || payload.Operation == nil {
 		base.Kind = ResultRefused
@@ -122,6 +128,12 @@ func (a *ProtocolAuthority) Apply(item OutboundItem) (AuthenticatedResponse, err
 		base.Kind = ResultRefused
 		base.Error = ErrTenant.Error()
 		return base, ErrTenant
+	}
+	if item.Kind != KindProtocol {
+		base.Kind = ResultRefused
+		base.Definitive = true
+		base.Error = ErrItem.Error()
+		return base, ErrItem
 	}
 	payload, err := DecodePayload(item.SignedObject)
 	if err != nil || payload.Kind != KindProtocol || payload.Command == nil {

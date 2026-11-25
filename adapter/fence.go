@@ -76,11 +76,15 @@ type FenceCoordinator interface {
 	Activate(newOwner, observedHead string) (Fence, error)
 }
 
-type handoffReady interface {
-	readyForHandoff() error
+// HandoffReady is implemented by FenceCoordinator authorities that can prove
+// a fenced generation has fence proof, stopped admission, and a non-empty
+// checkpoint head before HandoffCoordinatorDir copies state.
+type HandoffReady interface {
+	ReadyForHandoff() error
 }
 
 var _ FenceCoordinator = (*Coordinator)(nil)
+var _ HandoffReady = (*Coordinator)(nil)
 
 // Coordinator is a synthetic, local, in-memory fencing authority.
 // It cannot prove distributed fencing, anti-rollback, or that a fence
@@ -365,7 +369,10 @@ func (c *Coordinator) projectLocked(o *Owner) {
 	o.Admission = match && c.admission == admissionOpen
 }
 
-func (c *Coordinator) readyForHandoff() error {
+// ReadyForHandoff reports whether this coordinator is fenced with proof,
+// stopped for admission, drained, and holding a non-empty checkpoint head for
+// the fenced generation.
+func (c *Coordinator) ReadyForHandoff() error {
 	if c == nil {
 		return ErrActivation
 	}
@@ -391,21 +398,23 @@ func isNilCoordinator(coord FenceCoordinator) bool {
 	return v.Kind() == reflect.Ptr && v.IsNil()
 }
 
-// HandoffCoordinatorDir copies src to dst only after coord is fenced with
-// proof, stopped for admission, and holding a non-empty checkpoint head for
-// the fenced generation.
+// HandoffCoordinatorDir copies src to dst only after coord proves via
+// HandoffReady that it is fenced with proof, stopped for admission, and
+// holding a non-empty checkpoint head for the fenced generation. Coordinators
+// or wrappers that do not implement HandoffReady fail closed with ErrActivation.
 func HandoffCoordinatorDir(coord FenceCoordinator, src, dst string) error {
 	if isNilCoordinator(coord) {
 		return ErrActivation
 	}
-	if hr, ok := coord.(handoffReady); ok {
-		if err := hr.readyForHandoff(); err != nil {
-			return err
-		}
-	} else {
-		if _, err := coord.Historical(); err != nil || coord.Admission() != "stopped" {
-			return ErrActivation
-		}
+	hr, ok := coord.(HandoffReady)
+	if !ok {
+		return ErrActivation
+	}
+	if err := hr.ReadyForHandoff(); err != nil {
+		return err
+	}
+	if _, err := coord.Historical(); err != nil || coord.Admission() != "stopped" {
+		return ErrActivation
 	}
 	return CopyPrivateDir(src, dst)
 }

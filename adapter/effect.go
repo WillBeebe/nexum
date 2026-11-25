@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -64,7 +66,7 @@ type EffectRef struct {
 }
 
 func (r EffectRef) slot() string {
-	return r.Tenant + "\x00" + r.Namespace + "\x00" + r.EffectID
+	return fmt.Sprintf("%d:%s|%d:%s|%d:%s", len(r.Tenant), r.Tenant, len(r.Namespace), r.Namespace, len(r.EffectID), r.EffectID)
 }
 
 type EffectRecord struct {
@@ -115,6 +117,22 @@ func OpenEffects(dir string, key []byte) (*EffectAdapter, error) {
 	return &EffectAdapter{vault: v}, nil
 }
 
+const effectLockFile = "effect.lock"
+
+func effectFilename(id string) string { return id + ".effect" }
+func effectAAD(id string) string      { return vaultHeader + "/effect/" + id }
+
+func (e *EffectAdapter) withLock(fn func() error) error {
+	if e == nil || e.vault == nil {
+		return ErrItem
+	}
+	return e.vault.withNamedLock(effectLockFile, fn)
+}
+
+func (e *EffectAdapter) writeEffect(id string, rec EffectRecord) error {
+	return e.vault.writeNamed(effectFilename(id), effectAAD(id), rec)
+}
+
 // Intend records an effect intent in this vault. It does not apply an agreement.
 // Store.Apply and Intend are separate calls and are not atomic. A host that
 // needs both to commit together must use its own durable transaction, or a
@@ -126,10 +144,10 @@ func (e *EffectAdapter) Intend(intent EffectIntent) error {
 		return err
 	}
 	id := recordID(intent.Tenant, intent.EffectID)
-	return e.vault.withLock(func() error {
+	return e.withLock(func() error {
 		existing, err := e.readEffect(id, intent.Tenant, intent.EffectID)
 		if errors.Is(err, ErrNotFound) {
-			return e.vault.write(id, newIntentRecord(intent))
+			return e.writeEffect(id, newIntentRecord(intent))
 		}
 		if err != nil {
 			return err
@@ -152,7 +170,7 @@ func (e *EffectAdapter) Get(tenant, effectID string) (EffectRecord, error) {
 	if err := validateID(effectID); err != nil {
 		return rec, err
 	}
-	err := e.vault.withLock(func() error {
+	err := e.withLock(func() error {
 		loaded, err := e.readEffect(recordID(tenant, effectID), tenant, effectID)
 		if err != nil {
 			return err
@@ -187,7 +205,7 @@ func (e *EffectAdapter) Apply(tenant, effectID string, dest EffectDestination, f
 		return err
 	}
 	id := recordID(tenant, effectID)
-	return e.vault.withLock(func() error {
+	return e.withLock(func() error {
 		rec, err := e.readEffect(id, tenant, effectID)
 		if err != nil {
 			return err
@@ -225,6 +243,11 @@ func (e *EffectAdapter) Apply(tenant, effectID string, dest EffectDestination, f
 		if rec.Phase != EffectPhaseIntended && rec.Phase != EffectPhaseDispatching && rec.Phase != EffectPhaseUnknown {
 			return ErrCorrupt
 		}
+		// If an earlier attempt reached dispatching/unknown and Query did not
+		// prove OutcomeNotDispatched (moving rec back to intended), a subsequent
+		// OutcomeNotDispatched only proves this retry did not dispatch, NOT that
+		// the earlier attempt did not execute.
+		priorUncertain := rec.Phase != EffectPhaseIntended
 		// Idempotent replay may dispatch again from unknown. Proven
 		// not-dispatched has already been returned to intended. Either way
 		// the dispatching record is durable before Execute.
@@ -234,7 +257,7 @@ func (e *EffectAdapter) Apply(tenant, effectID string, dest EffectDestination, f
 		rec.ConfirmEvidence = ""
 		rec.Legacy = false
 		sealEffect(&rec)
-		if err = e.vault.write(id, rec); err != nil {
+		if err = e.writeEffect(id, rec); err != nil {
 			return err
 		}
 		if e.beforeExecute != nil {
@@ -243,7 +266,7 @@ func (e *EffectAdapter) Apply(tenant, effectID string, dest EffectDestination, f
 			}
 		}
 		outcome, execErr := dest.Execute(rec.Intent, ref, fence)
-		return e.persistOutcome(&rec, id, outcome, execErr)
+		return e.persistOutcome(&rec, id, outcome, execErr, priorUncertain)
 	})
 }
 
@@ -285,7 +308,7 @@ func (e *EffectAdapter) reconcile(rec *EffectRecord, id string, ref EffectRef, d
 	}
 }
 
-func (e *EffectAdapter) persistOutcome(rec *EffectRecord, id string, outcome DestinationOutcome, execErr error) error {
+func (e *EffectAdapter) persistOutcome(rec *EffectRecord, id string, outcome DestinationOutcome, execErr error, priorUncertain bool) error {
 	fenceErr := errors.Is(execErr, ErrFenced) || errors.Is(execErr, ErrAdmissionStopped)
 	ambiguous := fenceErr || (outcome == OutcomeConfirmed && execErr != nil) || (outcome != OutcomeConfirmed && outcome != OutcomeNotDispatched)
 	if ambiguous {
@@ -298,8 +321,14 @@ func (e *EffectAdapter) persistOutcome(rec *EffectRecord, id string, outcome Des
 		return execErr
 	}
 	if outcome == OutcomeNotDispatched {
-		if err := e.markIntended(rec, id); err != nil {
-			return err
+		if priorUncertain {
+			if err := e.markUnknown(rec, id); err != nil {
+				return err
+			}
+		} else {
+			if err := e.markIntended(rec, id); err != nil {
+				return err
+			}
 		}
 		if execErr != nil {
 			return execErr
@@ -319,7 +348,7 @@ func (e *EffectAdapter) markUnknown(rec *EffectRecord, id string) error {
 	rec.Phase = EffectPhaseUnknown
 	rec.ConfirmEvidence = ""
 	sealEffect(rec)
-	return e.vault.write(id, *rec)
+	return e.writeEffect(id, *rec)
 }
 
 func (e *EffectAdapter) markIntended(rec *EffectRecord, id string) error {
@@ -327,7 +356,7 @@ func (e *EffectAdapter) markIntended(rec *EffectRecord, id string) error {
 	rec.ConfirmEvidence = ""
 	rec.Legacy = false
 	sealEffect(rec)
-	return e.vault.write(id, *rec)
+	return e.writeEffect(id, *rec)
 }
 
 func (e *EffectAdapter) markConfirmed(rec *EffectRecord, id string, evidence string) error {
@@ -337,7 +366,7 @@ func (e *EffectAdapter) markConfirmed(rec *EffectRecord, id string, evidence str
 	rec.Phase = EffectPhaseConfirmed
 	rec.ConfirmEvidence = evidence
 	sealEffect(rec)
-	return e.vault.write(id, *rec)
+	return e.writeEffect(id, *rec)
 }
 
 func newIntentRecord(intent EffectIntent) EffectRecord {
@@ -362,17 +391,45 @@ func sealEffect(rec *EffectRecord) {
 	}
 }
 
+func isOutboxRecordJSON(plain []byte) bool {
+	var probe struct {
+		Item   json.RawMessage `json:"Item"`
+		Intent json.RawMessage `json:"Intent"`
+	}
+	if json.Unmarshal(plain, &probe) != nil {
+		return false
+	}
+	hasItem := len(probe.Item) > 0 && string(probe.Item) != "null"
+	hasIntent := len(probe.Intent) > 0 && string(probe.Intent) != "null"
+	return hasItem && !hasIntent
+}
+
 func (e *EffectAdapter) readEffect(id, tenant, effectID string) (EffectRecord, error) {
 	var stored EffectRecord
-	if err := e.vault.read(id, &stored); err != nil {
+	fromLegacyBox := false
+	err := e.vault.readNamed(effectFilename(id), effectAAD(id), &stored)
+	if errors.Is(err, ErrNotFound) {
+		plain, lerr := e.vault.readNamedBytes(id+".box", vaultHeader+"/"+id)
+		if lerr != nil {
+			return EffectRecord{}, lerr
+		}
+		defer clear(plain)
+		if isOutboxRecordJSON(plain) {
+			return EffectRecord{}, ErrNotFound
+		}
+		if json.Unmarshal(plain, &stored) != nil {
+			return EffectRecord{}, ErrCorrupt
+		}
+		fromLegacyBox = true
+	} else if err != nil {
 		return EffectRecord{}, err
 	}
 	rec, rewrite, err := normalizeEffect(stored, tenant, effectID)
 	if err != nil {
 		return EffectRecord{}, err
 	}
-	if rewrite {
-		if err = e.vault.write(id, rec); err != nil {
+	if rewrite || fromLegacyBox {
+		if err = e.writeEffect(id, rec); err != nil {
 			return EffectRecord{}, err
 		}
 	}
