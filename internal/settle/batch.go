@@ -5,8 +5,17 @@ package settle
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"time"
+)
+
+const (
+	rootDomainEmpty   = "nex/settle/root/v2/empty\x00"
+	rootDomainLeafHex = "nex/settle/root/v2/leaf-hex32\x00"
+	rootDomainLeafRaw = "nex/settle/root/v2/leaf-raw\x00"
+	rootDomainNode    = "nex/settle/root/v2/node\x00"
+	rootDomainFinal   = "nex/settle/root/v2/final\x00"
 )
 
 // Batch is one L2 settlement of verified agreements.
@@ -23,21 +32,31 @@ type Batch struct {
 	GPUs         int       `json:"gpus"`
 }
 
-// Root is a pairwise merkle of receipt hashes. Odd leaves are
-// duplicated so the tree is even at every layer.
+// Root is a domain-separated pairwise merkle of receipt hashes committing
+// leaf count and distinguishing empty lists, 32-byte hex leaves, raw leaves,
+// and internal nodes.
 func Root(hashes []string) string {
 	if len(hashes) == 0 {
-		sum := sha256.Sum256(nil)
+		sum := sha256.Sum256([]byte(rootDomainEmpty))
 		return hex.EncodeToString(sum[:])
 	}
 	layer := make([][]byte, len(hashes))
+	var lenBuf [8]byte
 	for i, h := range hashes {
-		b, err := hex.DecodeString(h)
-		if err != nil || len(b) == 0 {
-			sum := sha256.Sum256([]byte(h))
-			b = sum[:]
+		dig := sha256.New()
+		if len(h) == 64 {
+			if b, err := hex.DecodeString(h); err == nil && len(b) == 32 {
+				dig.Write([]byte(rootDomainLeafHex))
+				dig.Write(b)
+				layer[i] = dig.Sum(nil)
+				continue
+			}
 		}
-		layer[i] = b
+		dig.Write([]byte(rootDomainLeafRaw))
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(h)))
+		dig.Write(lenBuf[:])
+		dig.Write([]byte(h))
+		layer[i] = dig.Sum(nil)
 	}
 	for len(layer) > 1 {
 		if len(layer)%2 == 1 {
@@ -47,15 +66,20 @@ func Root(hashes []string) string {
 		}
 		next := make([][]byte, 0, len(layer)/2)
 		for i := 0; i < len(layer); i += 2 {
-			buf := make([]byte, 0, len(layer[i])+len(layer[i+1]))
-			buf = append(buf, layer[i]...)
-			buf = append(buf, layer[i+1]...)
-			sum := sha256.Sum256(buf)
-			next = append(next, sum[:])
+			dig := sha256.New()
+			dig.Write([]byte(rootDomainNode))
+			dig.Write(layer[i])
+			dig.Write(layer[i+1])
+			next = append(next, dig.Sum(nil))
 		}
 		layer = next
 	}
-	return hex.EncodeToString(layer[0])
+	final := sha256.New()
+	final.Write([]byte(rootDomainFinal))
+	binary.BigEndian.PutUint64(lenBuf[:], uint64(len(hashes)))
+	final.Write(lenBuf[:])
+	final.Write(layer[0])
+	return hex.EncodeToString(final.Sum(nil))
 }
 
 // Commit builds a batch at height 1 unless prevHeight is set by

@@ -40,8 +40,17 @@ func VerifySealed(bundle nexum.SealedProofBundle) error {
 }
 
 func Verify(as []*nexum.Agreement, h pow.Header, minBits int) error {
+	if minBits < 1 {
+		return fmt.Errorf("l2: verify: minBits %d must be >= 1", minBits)
+	}
+	if h.DiffBits < 1 || h.DiffBits > 256 {
+		return fmt.Errorf("l2: verify: DiffBits %d out of bounds", h.DiffBits)
+	}
 	if h.DiffBits < minBits {
 		return fmt.Errorf("l2: verify: DiffBits %d below floor %d", h.DiffBits, minBits)
+	}
+	if len(as) == 0 {
+		return fmt.Errorf("l2: verify: empty batch")
 	}
 	root, err := Root(as)
 	if err != nil {

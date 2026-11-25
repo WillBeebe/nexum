@@ -227,18 +227,27 @@ func (d *state) UnmarshalBinary(b []byte) error {
 		return errors.New("sha3: invalid hash state function")
 	}
 
-	copy(d.a[:], b)
-	b = b[len(d.a):]
+	var a [len(d.a)]byte
+	copy(a[:], b)
+	b = b[len(a):]
 
-	n, state := int(b[0]), spongeDirection(b[1])
-	if n > d.rate {
+	n, st := int(b[0]), spongeDirection(b[1])
+	switch st {
+	case spongeAbsorbing:
+		if n < 0 || n >= d.rate {
+			return errors.New("sha3: invalid hash state")
+		}
+	case spongeSqueezing:
+		if n < 0 || n > d.rate {
+			return errors.New("sha3: invalid hash state")
+		}
+	default:
 		return errors.New("sha3: invalid hash state")
 	}
+
+	d.a = a
 	d.n = n
-	if state != spongeAbsorbing && state != spongeSqueezing {
-		return errors.New("sha3: invalid hash state")
-	}
-	d.state = state
+	d.state = st
 
 	return nil
 }

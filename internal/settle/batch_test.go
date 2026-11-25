@@ -24,12 +24,17 @@ func TestRootOrderMatters(t *testing.T) {
 func TestRootOddLeaf(t *testing.T) {
 	h := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	got := Root([]string{h})
-	if got == "" {
-		t.Fatal("empty")
+	if len(got) != 64 {
+		t.Fatalf("single leaf root len = %d, want 64 (%q)", len(got), got)
 	}
-	// one leaf: the root is that leaf's bytes, hex-encoded (no pair)
-	if got != h {
-		t.Fatalf("single leaf want %s got %s", h, got)
+	if got != Root([]string{h}) {
+		t.Fatal("single leaf root not deterministic")
+	}
+	if got == h {
+		t.Fatalf("single leaf root must be domain-separated from raw leaf %s", h)
+	}
+	if got == Root(nil) || got == Root([]string{h, h}) {
+		t.Fatalf("single leaf root collided with empty or duplicate leaf list: %s", got)
 	}
 }
 

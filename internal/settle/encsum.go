@@ -76,8 +76,14 @@ func (l *EncryptedLedger) SealLock(amount int64) ([]byte, error) {
 // Aggregate sums sealed locks homomorphically: ciphertext in, ciphertext
 // out. Empty input fails closed.
 func (l *EncryptedLedger) Aggregate(sealed [][]byte) ([]byte, error) {
-	if len(sealed) == 0 {
+	if l == nil || l.p == nil || len(sealed) == 0 {
 		return nil, ErrNoLocks
+	}
+	if !l.p.ValidCiphertext(sealed[0]) {
+		return nil, fmt.Errorf("settle: aggregate: %w", he.ErrAdd)
+	}
+	if len(sealed) == 1 {
+		return append([]byte(nil), sealed[0]...), nil
 	}
 	sum := sealed[0]
 	var err error
@@ -152,19 +158,22 @@ func VerifyPublic(public []byte, ciphertexts [][]byte, aggregate []byte, amount 
 	if amount <= 0 {
 		return ErrBadLock
 	}
-	if len(ciphertexts) == 0 || len(ciphertexts) > 128 || len(aggregate) == 0 || len(aggregate) > 8192 || len(proof) == 0 || len(proof) > 8192 {
+	if len(ciphertexts) == 0 || len(ciphertexts) > 128 || len(aggregate) == 0 || len(aggregate) > 8192 || aggregate[0] == 0 || len(proof) == 0 || len(proof) > 8192 {
 		return ErrSumMismatch
 	}
 	p, err := he.FromPublic(public)
 	if err != nil {
 		return err
 	}
+	if !p.ValidCiphertext(aggregate) {
+		return ErrSumMismatch
+	}
 	for _, ct := range ciphertexts {
-		if len(ct) == 0 || len(ct) > 8192 {
+		if len(ct) == 0 || len(ct) > 8192 || ct[0] == 0 {
 			return ErrSumMismatch
 		}
-		if _, err = p.Add(ct, ct); err != nil {
-			return err
+		if !p.ValidCiphertext(ct) {
+			return he.ErrAdd
 		}
 	}
 	sum := append([]byte(nil), ciphertexts[0]...)

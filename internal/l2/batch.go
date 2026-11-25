@@ -85,7 +85,7 @@ func executionPolicyDigest(a *nexum.Agreement) ([32]byte, error) {
 // and last receipt hash, in order. Rewriting any of these moves the root.
 func Root(as []*nexum.Agreement) ([32]byte, error) {
 	st := keccak.NewLegacyKeccak256()
-	if len(as) > 4096 {
+	if len(as) == 0 || len(as) > 4096 {
 		return [32]byte{}, fmt.Errorf("l2: batch size out of bounds")
 	}
 	for _, a := range as {
@@ -120,6 +120,9 @@ func Root(as []*nexum.Agreement) ([32]byte, error) {
 
 // Seal builds a header on the batch root and burns PoW.
 func Seal(as []*nexum.Agreement, bits int, now time.Time) (Batch, error) {
+	if bits < 1 || bits > 64 {
+		return Batch{}, fmt.Errorf("l2: difficulty must be 1..64")
+	}
 	root, err := Root(as)
 	if err != nil {
 		return Batch{}, err

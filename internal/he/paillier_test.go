@@ -67,7 +67,7 @@ func TestPaillierRejectsNonUnits(t *testing.T) {
 		if err := json.Unmarshal(proof, &original); err != nil {
 			t.Fatal(err)
 		}
-		for _, malformed := range []zkProof{{A: bad, Z: original.Z}, {A: original.A, Z: bad}} {
+		for _, malformed := range []zkProof{{A: bad, Z: original.Z, R: original.R}, {A: original.A, Z: bad, R: original.R}} {
 			encoded, err := json.Marshal(malformed)
 			if err != nil {
 				t.Fatal(err)

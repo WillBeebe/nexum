@@ -33,7 +33,7 @@ func RestorePrivate(s PrivateState) (*EncryptedLedger, error) {
 	l := &EncryptedLedger{p: p}
 	n := p.N()
 	for _, b := range s.Randomness {
-		if len(b) > len(s.Key.N) {
+		if len(b) == 0 || b[0] == 0 || len(b) > len(s.Key.N) {
 			return nil, errors.New("settle: invalid checkpoint randomness")
 		}
 		r := new(big.Int).SetBytes(b)

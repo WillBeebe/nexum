@@ -33,8 +33,8 @@ func (h Header) Hash() []byte {
 	var tb [8]byte
 	binary.BigEndian.PutUint64(tb[:], uint64(h.TimeUnix))
 	_, _ = st.Write(tb[:])
-	var db [4]byte
-	binary.BigEndian.PutUint32(db[:], uint32(h.DiffBits))
+	var db [8]byte
+	binary.BigEndian.PutUint64(db[:], uint64(h.DiffBits))
 	_, _ = st.Write(db[:])
 	var nb [8]byte
 	binary.BigEndian.PutUint64(nb[:], h.Nonce)
@@ -57,7 +57,7 @@ func leadingZeros(sum []byte) int {
 
 // Valid reports whether Hash meets DiffBits.
 func (h Header) Valid() bool {
-	if h.DiffBits < 0 {
+	if h.DiffBits < 0 || h.DiffBits > 256 {
 		return false
 	}
 	return leadingZeros(h.Hash()) >= h.DiffBits
