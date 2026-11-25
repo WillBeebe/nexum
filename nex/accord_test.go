@@ -1386,3 +1386,150 @@ func TestAccordGuardNotAttestedIndependentResolverAndBundleAttester(t *testing.T
 		t.Fatalf("expected witness_dissented: %+v", g2["canary-rollout"])
 	}
 }
+
+func TestAccordArtifactRefsStrictlyMatchReturnedArtifacts(t *testing.T) {
+	buildHandoff := func(t *testing.T, incomplete bool) TaskHandoff {
+		t.Helper()
+		f := newProtocolFixture(t)
+		f.spec.Version = ProtocolVersionV2
+		f.spec.Return.SuccessArtifacts = []string{"declared"}
+		f.spec.Return.FailureArtifacts = []string{"declared"}
+		owner := protocolPublic(f.owner)
+		dir := t.TempDir()
+		key := bytes.Repeat([]byte{77}, 32)
+		goals, err := OpenGoalStore(filepath.Join(dir, "goals"), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempts, err := OpenProtocolStore(filepath.Join(dir, "attempts"), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := OpenCoordinationStore(filepath.Join(dir, "tasks"), key, goals, attempts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		goalID, err := goals.Create(GoalSpec{
+			Nonce: "filter-goal", Purpose: "Test ArtifactRefs filtering",
+			ConstraintsHash: Hash("c"), CompletionPolicyHash: Hash("p"), Planners: []Public{owner},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task := TaskSpec{
+			GoalID: goalID, Nonce: "filter-task", Purpose: f.spec.Purpose, Scope: f.spec.Scope,
+			SpecificationHash: f.spec.SpecificationHash, AcceptanceHash: f.spec.AcceptanceHash,
+			FailurePolicyHash: f.spec.FailurePolicyHash, Authority: owner,
+			Outputs: []string{"declared"}, FailureOutputs: []string{"declared"},
+		}
+		rev := PlanRevision{GoalID: goalID, Head: goalID, Planner: owner.ID(), RequestID: "p1", Tasks: []TaskSpec{task}}
+		if _, err := goals.Apply(rev, Sign(f.owner, PlanSignatureDomain, rev)); err != nil {
+			t.Fatal(err)
+		}
+		f.spec.TaskID = task.ID()
+		f.spec.Generation = 1
+		p, err := NewProtocol(f.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim := ClaimRequest{
+			GoalID: goalID, TaskID: task.ID(), WorkerID: protocolPublic(f.worker).ID(),
+			RequestID: "c1", ProtocolID: p.View().ID, LeaseUntilHeight: 41,
+		}
+		claimSig := Sign(f.owner, ClaimSignatureDomain, claim)
+		lease, err := tasks.Claim(claim, claimSig, f.spec, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		declaredRef := testArtifactRef("declared-bytes")
+		extraRef := testArtifactRef("undeclared-bytes")
+		if incomplete {
+			protocolApply(t, p, f.owner, "", "admit", nil)
+			cmd := p.Prepare(owner.ID(), "owner", f.spec.Scope, "incomplete", "inc", f.spec.ReturnByHeight)
+			cmd.Incomplete = &IncompleteReturn{
+				ReasonHash: Hash("timeout"),
+				Artifacts: []NamedArtifact{
+					{Name: "declared", Ref: declaredRef},
+					{Name: "undeclared-extra", Ref: extraRef},
+				},
+			}
+			if _, err := p.Apply(cmd, Sign(f.owner, "protocol", cmd), cmd.Height); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			p = enterProtocol(t, f)
+			protocolApply(t, p, f.worker, "worker", "report", func(c *ProtocolCommand) {
+				c.Report = &WorkReport{
+					Outcome: WorkCompleted, Stage: "work", ReasonHash: Hash("ok"),
+					Evidence: []string{declaredRef.Digest},
+					Manifest: &EvidenceManifest{
+						MethodHash: Hash("m"),
+						Outputs: []NamedArtifact{
+							{Name: "declared", Ref: declaredRef},
+							{Name: "unreturned-extra", Ref: extraRef},
+						},
+					},
+				}
+			})
+			reviewProtocol(t, p, f, false)
+			resolveProtocol(t, p, f, "accept")
+			protocolApply(t, p, f.worker, "worker", "return", func(c *ProtocolCommand) {
+				v := p.View()
+				c.Return = &ReturnManifest{
+					ResolutionHash: Hash(v.Resolution), ReviewsHash: Hash(v.Reviews),
+					Evidence: []string{declaredRef.Digest}, Uncertainty: "bounded",
+					SafeAssumptions: []string{"ok"}, Disposition: "continue",
+					Artifacts: []ReturnArtifact{{ID: "declared", Commitment: declaredRef.Digest, ReuseRestrictions: "cite"}},
+				}
+			})
+		}
+		for _, ev := range p.Bundle().Events {
+			if _, err := attempts.Apply(claim.ProtocolID, ev.Command, ev.Signature, ev.Command.Height); err != nil {
+				t.Fatal(err)
+			}
+		}
+		v := p.View()
+		if _, err := tasks.Finalize(lease, v.Head, v.Height); err != nil {
+			t.Fatal(err)
+		}
+		h, err := tasks.ExportHandoff(claim, claimSig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	accH := buildHandoff(t, false)
+	incH := buildHandoff(t, true)
+	fx := newAccordFixture(t)
+	fx.spec.Roles = append(fx.spec.Roles, AccordRoleGrant{
+		ID: "rel-att", Actor: fx.release.pub.ID(), Scope: fx.spec.Scope,
+		Permissions: []AccordPermission{AccordPermitAttest}, ExpiresAtHeight: 10, LimitsHash: Hash("a"),
+	})
+	fx.spec.Evidence = []EvidenceSlot{
+		{
+			ID: "acc", Kind: EvidenceTaskHandoff, GoalID: accH.Task.GoalID, TaskID: accH.Task.ID(),
+			ExpectedAuthority: accH.Task.Authority.ID(), ExpectedResultHash: Hash(accH.Result),
+		},
+		{
+			ID: "inc", Kind: EvidenceTaskHandoff, GoalID: incH.Task.GoalID, TaskID: incH.Task.ID(),
+			ExpectedAuthority: incH.Task.Authority.ID(), ExpectedResultHash: Hash(incH.Result),
+		},
+	}
+	a, err := NewAccord(fx.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accordMustApply(t, a, fx.release, "rel-att", "attest", "a1", 1, func(c *AccordCommand) {
+		c.Attest = &AttestPayload{EvidenceID: "acc", Handoff: &accH}
+	})
+	accordMustApply(t, a, fx.release, "rel-att", "attest", "a2", 2, func(c *AccordCommand) {
+		c.Attest = &AttestPayload{EvidenceID: "inc", Handoff: &incH}
+	})
+	for _, ev := range a.View().Evidence {
+		if len(ev.Artifacts) != 1 || len(ev.ArtifactRefs) != 1 ||
+			ev.ArtifactRefs[0].Name != "declared" || ev.ArtifactRefs[0].Ref.Digest != ev.Artifacts[0].Digest {
+			t.Fatalf("evidence %s leaked extra ArtifactRefs: artifacts=%+v refs=%+v", ev.EvidenceID, ev.Artifacts, ev.ArtifactRefs)
+		}
+	}
+}

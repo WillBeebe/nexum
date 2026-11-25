@@ -442,21 +442,21 @@ func verifyAttestEvidence(slot EvidenceSlot, payload AttestPayload, attester str
 		fact.Artifacts = nil
 	}
 
+	var candidateRefs []NamedArtifact
 	switch fact.Outcome {
-	case TaskAccepted:
-		if view.Report != nil && view.Report.Manifest != nil && len(view.Report.Manifest.Outputs) > 0 {
-			fact.ArtifactRefs = slices.Clone(view.Report.Manifest.Outputs)
+	case TaskAccepted, TaskRejected:
+		if view.Report != nil && view.Report.Manifest != nil {
+			candidateRefs = view.Report.Manifest.Outputs
 		}
 	case TaskIncomplete:
-		if view.Incomplete != nil && len(view.Incomplete.Artifacts) > 0 {
-			fact.ArtifactRefs = slices.Clone(view.Incomplete.Artifacts)
+		if view.Incomplete != nil {
+			candidateRefs = view.Incomplete.Artifacts
 		}
-	case TaskRejected:
-		if view.Report != nil && view.Report.Manifest != nil && len(fact.Artifacts) > 0 {
-			for _, out := range view.Report.Manifest.Outputs {
-				if slices.Contains(fact.Artifacts, TaskArtifact{Slot: out.Name, Digest: out.Ref.Digest}) {
-					fact.ArtifactRefs = append(fact.ArtifactRefs, out)
-				}
+	}
+	if len(candidateRefs) > 0 && len(fact.Artifacts) > 0 {
+		for _, a := range candidateRefs {
+			if slices.Contains(fact.Artifacts, TaskArtifact{Slot: a.Name, Digest: a.Ref.Digest}) {
+				fact.ArtifactRefs = append(fact.ArtifactRefs, a)
 			}
 		}
 	}
