@@ -30,6 +30,9 @@ func (a *Agreement) WithUnitAt(symbol string, now time.Time) error {
 	if a == nil {
 		return nil
 	}
+	if err := a.requireExecutableCustody(); err != nil {
+		return err
+	}
 	if a.terminal() {
 		return ErrTakeback
 	}

@@ -302,6 +302,9 @@ func (l receiptLedger) append(actor Party, action, note string, now time.Time) e
 	if l.maxSteps <= 0 || n >= l.maxSteps {
 		return ErrDoS
 	}
+	if !validMeterNumbers(Meter{CostUSD: l.cost, BudgetUSD: l.budget}) {
+		return ErrInvalid
+	}
 	if l.checkBudget && l.budget > 0 && l.cost > l.budget {
 		return ErrBudget
 	}

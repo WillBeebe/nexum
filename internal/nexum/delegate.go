@@ -57,15 +57,16 @@ type Delegate struct {
 
 // SignReceipts arms receipt signatures for the delegation parties.
 func (d *Delegate) SignReceipts(keys map[Party]ed25519.PrivateKey) error {
-	for party, key := range keys {
-		if len(key) != ed25519.PrivateKeySize {
-			return ErrInvalid
-		}
-		if party != d.Parent && party != d.Intern {
-			return ErrWrongParty
-		}
+	if d == nil {
+		return ErrInvalid
 	}
-	d.actorKeys = keys
+	cloned, err := cloneActorKeys(keys, func(p Party) bool {
+		return p == d.Parent || p == d.Intern
+	})
+	if err != nil {
+		return err
+	}
+	d.actorKeys = cloned
 	return nil
 }
 
@@ -100,8 +101,14 @@ func openDelegate(format int, id string, parent, intern Party, reward int64, tas
 	if task.ProofKind == "" {
 		task.ProofKind = "citation"
 	}
+	if !validMeterNumbers(meter) {
+		return nil, ErrInvalid
+	}
 	if meter.MaxSteps <= 0 {
 		meter.MaxSteps = 16
+	}
+	if meter.MaxSteps > 128 {
+		return nil, ErrInvalid
 	}
 	d := &Delegate{
 		ID:        id,
@@ -500,7 +507,7 @@ func (d *Delegate) classify() (string, error) {
 	if d == nil || len(d.Receipts) == 0 {
 		return "", ErrInvalid
 	}
-	if !validSiblingFormat(d.Format) || d.Kind != KindDelegate {
+	if !validSiblingFormat(d.Format) || d.Kind != KindDelegate || !validMeterNumbers(d.Meter) {
 		return "", ErrInvalid
 	}
 	if err := validateDelegateShape(d); err != nil {

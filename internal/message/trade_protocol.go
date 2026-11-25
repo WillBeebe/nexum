@@ -90,12 +90,24 @@ func (p TradePayload) Validate(link TradeLink) error {
 }
 
 // ValidateTradeSuccessor enforces turn ownership and the only legal sequence.
-// The prior message must have been released before another operation can bind
-// it; the receiving agent validates the decrypted payload before responding.
+// The prior message must have been verified, agreed, and released before
+// another operation can bind it; the receiving agent validates the decrypted
+// payload before responding.
 func ValidateTradeSuccessor(parent Record, child Offer) error {
+	if err := parent.Verify(); err != nil {
+		return err
+	}
+	if err := child.Verify(); err != nil {
+		return err
+	}
 	p, c := parent.Offer.Terms.Trade, child.Terms.Trade
-	if p == nil || c == nil || c.ID != p.ID || c.Parent != parent.Offer.Hash() || child.Terms.ReplyTo != parent.Offer.Terms.ID || child.Terms.ConversationID != parent.Offer.Terms.ConversationID ||
-		child.Terms.Sender.ID() != parent.Offer.Terms.Recipient.ID() || child.Terms.Recipient.ID() != parent.Offer.Terms.Sender.ID() || parent.Release == nil {
+	if p == nil || c == nil || c.ID != p.ID || c.Parent != parent.Offer.Hash() ||
+		child.Terms.ReplyTo != parent.Offer.Terms.ID ||
+		parent.Offer.Terms.ConversationID == "" || child.Terms.ConversationID != parent.Offer.Terms.ConversationID ||
+		(child.Terms.ReplyChain != "" && child.Terms.ReplyChain != ReplyChainHash(parent)) ||
+		child.Terms.Sender.ID() != parent.Offer.Terms.Recipient.ID() ||
+		child.Terms.Recipient.ID() != parent.Offer.Terms.Sender.ID() ||
+		parent.Decision == nil || parent.Decision.Action != "agree" || parent.Release == nil {
 		return ErrState
 	}
 	allowed := map[string][]string{"request": {"offer", "reject"}, "offer": {"counteroffer", "accept", "reject"}, "counteroffer": {"counteroffer", "accept", "reject"}, "accept": {"fulfill"}, "fulfill": {"settle"}}
@@ -155,23 +167,90 @@ func SealWithReleaseBy(i Identity, recipient Public, text []byte, invitation str
 }
 
 // VerifyConversationOrder checks that replies in one conversation form the
-// chain their senders committed to: each record with a ReplyChain must point
-// at another record in the set, and the set must be closed under the
-// relation (no gaps the relay could have dropped silently). Records are in
-// drain order; chain direction is backwards, so out-of-order delivery is
-// fine but a missing link is not.
+// chain their senders committed to: all records must share one non-empty
+// ConversationID without duplicates, every ReplyTo must resolve within the
+// conversation without cycles, and every ReplyChain must point at the exact
+// parent record identified by ReplyTo (no gaps, splicing, or mismatches).
+// Records are in drain order; out-of-order delivery is fine but a missing link
+// or cross-conversation splice is not.
 func VerifyConversationOrder(records []Record) error {
-	byHash := make(map[string]bool, len(records))
+	if len(records) == 0 {
+		return nil
+	}
+	byHash := make(map[string]Record, len(records))
+	byID := make(map[string]Record, len(records))
+	convID := records[0].Offer.Terms.ConversationID
+	if convID == "" {
+		return fmt.Errorf("message: conversation id required: %w", ErrInvalid)
+	}
 	for i := range records {
 		if err := records[i].Verify(); err != nil {
 			return err
 		}
-		byHash[records[i].Offer.Hash()] = true
+		t := records[i].Offer.Terms
+		if t.ConversationID != convID {
+			return fmt.Errorf("message: conversation id mismatch: %w", ErrInvalid)
+		}
+		h := records[i].Offer.Hash()
+		if _, dup := byHash[h]; dup {
+			return fmt.Errorf("message: duplicate record %s: %w", h, ErrInvalid)
+		}
+		if _, dup := byID[t.ID]; dup {
+			return fmt.Errorf("message: duplicate message id %s: %w", t.ID, ErrInvalid)
+		}
+		byHash[h] = records[i]
+		byID[t.ID] = records[i]
 	}
 	for i := range records {
-		chain := records[i].Offer.Terms.ReplyChain
-		if chain != "" && !byHash[chain] {
-			return fmt.Errorf("message: conversation gap: reply chain %s missing", chain)
+		t := records[i].Offer.Terms
+		h := records[i].Offer.Hash()
+		if t.ReplyTo != "" {
+			if t.ReplyTo == t.ID {
+				return fmt.Errorf("message: self-reply %s: %w", t.ID, ErrInvalid)
+			}
+			parent, ok := byID[t.ReplyTo]
+			if !ok {
+				return fmt.Errorf("message: conversation gap: reply target %s missing", t.ReplyTo)
+			}
+			if parent.Offer.Terms.ConversationID != convID {
+				return fmt.Errorf("message: cross-conversation reply target %s: %w", t.ReplyTo, ErrInvalid)
+			}
+			if t.ReplyChain != "" && t.ReplyChain != ReplyChainHash(parent) {
+				return fmt.Errorf("message: reply chain %s does not match reply target %s: %w", t.ReplyChain, t.ReplyTo, ErrInvalid)
+			}
+		}
+		if t.ReplyChain != "" {
+			if t.ReplyChain == h {
+				return fmt.Errorf("message: self-reply chain %s: %w", h, ErrInvalid)
+			}
+			parent, ok := byHash[t.ReplyChain]
+			if !ok {
+				return fmt.Errorf("message: conversation gap: reply chain %s missing", t.ReplyChain)
+			}
+			if parent.Offer.Terms.ConversationID != convID || t.ReplyTo != parent.Offer.Terms.ID {
+				return fmt.Errorf("message: reply chain %s does not match reply target %s: %w", t.ReplyChain, t.ReplyTo, ErrInvalid)
+			}
+		}
+	}
+	// Reject ReplyTo cycles (0 = unvisited, 1 = visiting, 2 = visited).
+	state := make(map[string]uint8, len(records))
+	for id := range byID {
+		if state[id] != 0 {
+			continue
+		}
+		cur := id
+		for cur != "" && state[cur] == 0 {
+			state[cur] = 1
+			next := byID[cur].Offer.Terms.ReplyTo
+			if next != "" && state[next] == 1 {
+				return fmt.Errorf("message: reply cycle involving %s: %w", next, ErrInvalid)
+			}
+			cur = next
+		}
+		cur = id
+		for cur != "" && state[cur] == 1 {
+			state[cur] = 2
+			cur = byID[cur].Offer.Terms.ReplyTo
 		}
 	}
 	return nil

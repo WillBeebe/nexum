@@ -91,7 +91,7 @@ func RestorePrivate(s PrivateCheckpoint) (*Agreement, error) {
 	default:
 		return nil, bad
 	}
-	if a.Mode == ModePlaintext && (s.Ledger != nil || seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0) {
+	if a.Mode == ModePlaintext && (s.Ledger != nil || seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 || a.Scheme != "" || len(a.PublicKey) > 0 || len(a.SealedEqualityProof) > 0) {
 		return nil, bad
 	}
 	if s.Ledger != nil {
@@ -133,7 +133,7 @@ func RestorePrivate(s PrivateCheckpoint) (*Agreement, error) {
 		} else if len(a.SealedSum) != 0 || len(a.SealedAggregate) != 0 {
 			return nil, bad
 		}
-	} else if seals > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 || a.Mode == ModeSealed {
+	} else if a.sealedPath() {
 		return nil, bad
 	}
 	return &a, nil

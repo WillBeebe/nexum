@@ -36,12 +36,18 @@ const (
 // is not required when the aggregate, proof and public key were retained.
 func (a *Agreement) PublicSealedProof() (SealedProofBundle, error) {
 	var zero SealedProofBundle
-	if a == nil {
+	if a == nil || a.Status != StatusAccepted {
 		return zero, ErrInvalid
 	}
-	proof := append([]byte(nil), a.SealedEqualityProof...)
-	if len(proof) == 0 {
-		proof = legacyEqualityProof(a)
+	if err := a.VerifyReceipts(); err != nil {
+		return zero, err
+	}
+	if err := a.sealsMatchReceipts(); err != nil {
+		return zero, err
+	}
+	proof, err := committedEqualityProof(a)
+	if err != nil {
+		return zero, err
 	}
 	aggregate := a.SealedAggregate
 	if len(aggregate) == 0 {
@@ -98,7 +104,7 @@ func VerifySealedProofBundle(b SealedProofBundle) error {
 // receipt chain, ordered seal notes and terms. It does not require private
 // custody. Receipt-chain success alone is not settlement verification.
 func (a *Agreement) VerifySealedSettlement(b SealedProofBundle) error {
-	if a == nil {
+	if a == nil || a.Status != StatusAccepted {
 		return ErrInvalid
 	}
 	if err := a.VerifyReceipts(); err != nil {
@@ -107,10 +113,17 @@ func (a *Agreement) VerifySealedSettlement(b SealedProofBundle) error {
 	if err := a.sealsMatchReceipts(); err != nil {
 		return err
 	}
+	want, err := committedEqualityProof(a)
+	if err != nil {
+		return err
+	}
 	if err := VerifySealedProofBundle(b); err != nil {
 		return err
 	}
 	if b.TermsDigest != a.TermsDigest() || b.ReceiptHead != a.head() || b.Amount != a.Amount {
+		return ErrInvalid
+	}
+	if a.Scheme != "" && b.Scheme != a.Scheme {
 		return ErrInvalid
 	}
 	if len(a.PublicKey) > 0 && !bytes.Equal(b.PublicKey, a.PublicKey) {
@@ -124,21 +137,33 @@ func (a *Agreement) VerifySealedSettlement(b SealedProofBundle) error {
 			return ErrInvalid
 		}
 	}
-	want := a.SealedEqualityProof
-	if len(want) == 0 {
-		want = legacyEqualityProof(a)
-	}
-	if len(want) == 0 || !bytes.Equal(want, b.EqualityProof) {
+	if !bytes.Equal(want, b.EqualityProof) {
 		return ErrInvalid
 	}
-	agg := a.SealedAggregate
-	if len(agg) == 0 {
-		agg = a.SealedSum
+	if len(a.SealedAggregate) > 0 && !bytes.Equal(a.SealedAggregate, b.Aggregate) {
+		return ErrInvalid
 	}
-	if len(agg) > 0 && !bytes.Equal(agg, b.Aggregate) {
+	if len(a.SealedSum) > 0 && !bytes.Equal(a.SealedSum, b.Aggregate) {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// committedEqualityProof returns the equality proof committed in the "accept"
+// receipt of an accepted sealed agreement. If the unhashed SealedEqualityProof
+// field is also populated, it must match the receipt commitment exactly.
+func committedEqualityProof(a *Agreement) ([]byte, error) {
+	if a == nil || a.Status != StatusAccepted {
+		return nil, ErrInvalid
+	}
+	receiptProof := legacyEqualityProof(a)
+	if len(receiptProof) == 0 {
+		return nil, ErrInvalid
+	}
+	if len(a.SealedEqualityProof) > 0 && !bytes.Equal(a.SealedEqualityProof, receiptProof) {
+		return nil, ErrInvalid
+	}
+	return append([]byte(nil), receiptProof...), nil
 }
 
 func (a *Agreement) sealsMatchReceipts() error {

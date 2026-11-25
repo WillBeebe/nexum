@@ -52,15 +52,16 @@ type Workflow struct {
 
 // SignReceipts arms receipt signatures for workflow actors.
 func (w *Workflow) SignReceipts(keys map[Party]ed25519.PrivateKey) error {
-	for party, key := range keys {
-		if len(key) != ed25519.PrivateKeySize {
-			return ErrInvalid
-		}
-		if party != w.Actor {
-			return ErrWrongParty
-		}
+	if w == nil {
+		return ErrInvalid
 	}
-	w.actorKeys = keys
+	cloned, err := cloneActorKeys(keys, func(p Party) bool {
+		return p == w.Actor
+	})
+	if err != nil {
+		return err
+	}
+	w.actorKeys = cloned
 	return nil
 }
 
@@ -91,8 +92,14 @@ func openWorkflow(format int, id string, actor Party, root string, nodes map[str
 	if err != nil {
 		return nil, err
 	}
+	if !validMeterNumbers(meter) {
+		return nil, ErrInvalid
+	}
 	if meter.MaxSteps <= 0 {
 		meter.MaxSteps = 64
+	}
+	if meter.MaxSteps > 128 {
+		return nil, ErrInvalid
 	}
 	w := &Workflow{
 		ID:        id,
@@ -506,7 +513,7 @@ func (w *Workflow) classify() (string, error) {
 	if w == nil || len(w.Receipts) == 0 {
 		return "", ErrInvalid
 	}
-	if !validSiblingFormat(w.Format) || w.Kind != KindWorkflow {
+	if !validSiblingFormat(w.Format) || w.Kind != KindWorkflow || !validMeterNumbers(w.Meter) {
 		return "", ErrInvalid
 	}
 	if err := validateWorkflowGraph(w); err != nil {
@@ -739,10 +746,12 @@ func matchLegacyWorkflowExecute(w *Workflow, note string) ([]workflowWalk, bool)
 		if len(path) >= len(w.Nodes) || !strings.HasPrefix(note, prefix+" ") {
 			return
 		}
+		seenChild := make(map[string]bool, len(n.Next))
 		for _, ch := range n.Next {
-			if visited[ch] {
+			if visited[ch] || seenChild[ch] {
 				continue
 			}
+			seenChild[ch] = true
 			visited[ch] = true
 			path = append(path, ch)
 			dfs(ch, prefix+" "+ch)

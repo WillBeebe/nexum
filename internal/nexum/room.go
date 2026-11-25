@@ -167,13 +167,16 @@ func (a *Agreement) rejectSealed(actor Party, now time.Time) error {
 // StartSealed arms this escrow for ciphertext settlement with an
 // `bits`-bit Paillier ledger. Call after OpenEscrow, before any move.
 func (a *Agreement) StartSealed(bits int) error {
+	if a == nil {
+		return ErrInvalid
+	}
 	if a.Format >= FormatV2 || a.Mode != "" {
 		return ErrBadState
 	}
 	if a.Status != StatusOpen || a.LockedAt != nil {
 		return ErrBadState
 	}
-	if a.Sealed != nil || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 {
+	if a.sealedPath() {
 		return ErrBadState
 	}
 	for _, r := range a.Receipts {

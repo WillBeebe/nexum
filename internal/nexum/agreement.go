@@ -4,12 +4,14 @@
 package nexum
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/WillBeebe/nexum/v2/internal/settle"
@@ -106,20 +108,49 @@ type Agreement struct {
 // SignReceipts arms receipt signatures: every appended receipt is signed by
 // the given party keys, and VerifyReceipts requires them. Parties without
 // a key keep legacy unsigned receipts.
-//
-//	want := ed25519.NewKeyFromSeed(key[:ed25519.SeedSize])
-//	if !equalBytes(want, key) { return ErrInvalid }
 func (a *Agreement) SignReceipts(keys map[Party]ed25519.PrivateKey) error {
+	if a == nil {
+		return ErrInvalid
+	}
+	cloned, err := cloneActorKeys(keys, func(p Party) bool {
+		return p == a.Buyer || p == a.Seller
+	})
+	if err != nil {
+		return err
+	}
+	a.actorKeys = cloned
+	return nil
+}
+
+func cloneActorKeys(keys map[Party]ed25519.PrivateKey, allowed func(Party) bool) (map[Party]ed25519.PrivateKey, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	cloned := make(map[Party]ed25519.PrivateKey, len(keys))
 	for party, key := range keys {
 		if len(key) != ed25519.PrivateKeySize {
-			return ErrInvalid
+			return nil, ErrInvalid
 		}
-		if party != a.Buyer && party != a.Seller {
-			return ErrWrongParty
+		want := ed25519.NewKeyFromSeed(key[:ed25519.SeedSize])
+		if !bytes.Equal(want, key) {
+			return nil, ErrInvalid
 		}
+		if !allowed(party) {
+			return nil, ErrWrongParty
+		}
+		cloned[party] = append(ed25519.PrivateKey(nil), key...)
 	}
-	a.actorKeys = keys
-	return nil
+	return cloned, nil
+}
+
+func validMeterNumbers(m Meter) bool {
+	if math.IsNaN(m.CostUSD) || math.IsInf(m.CostUSD, 0) || m.CostUSD < 0 {
+		return false
+	}
+	if math.IsNaN(m.BudgetUSD) || math.IsInf(m.BudgetUSD, 0) || m.BudgetUSD < 0 {
+		return false
+	}
+	return true
 }
 
 var (
@@ -155,6 +186,9 @@ func OpenAgreement(id, kind string, buyer, seller Party, amount int64, meter Met
 // Sealed mode binds the Paillier scheme and public modulus into the v2 terms
 // digest. Plaintext mode refuses StartSealed. v1 OpenEscrow is unchanged.
 func OpenAgreementV2(id, kind string, buyer, seller Party, amount int64, meter Meter, now time.Time, mode string, bits int) (*Agreement, error) {
+	if id == "" {
+		return nil, ErrInvalid
+	}
 	if kind == "" {
 		return nil, errors.New("nexum: agreement kind required")
 	}
@@ -169,6 +203,9 @@ func OpenAgreementV2(id, kind string, buyer, seller Party, amount int64, meter M
 	}
 	if amount <= 0 {
 		return nil, ErrZeroAmount
+	}
+	if !validMeterNumbers(meter) {
+		return nil, ErrInvalid
 	}
 	if meter.MaxSteps <= 0 {
 		meter.MaxSteps = 8
@@ -198,6 +235,9 @@ func OpenAgreementV2(id, kind string, buyer, seller Party, amount int64, meter M
 	return a, nil
 }
 func openAgreement(id, kind string, buyer, seller Party, amount int64, meter Meter, now time.Time, note string) (*Agreement, error) {
+	if id == "" {
+		return nil, ErrInvalid
+	}
 	if buyer == "" || seller == "" {
 		return nil, ErrMissingParty
 	}
@@ -206,6 +246,9 @@ func openAgreement(id, kind string, buyer, seller Party, amount int64, meter Met
 	}
 	if amount <= 0 {
 		return nil, ErrZeroAmount
+	}
+	if !validMeterNumbers(meter) {
+		return nil, ErrInvalid
 	}
 	if meter.MaxSteps <= 0 {
 		meter.MaxSteps = 8
@@ -329,7 +372,15 @@ func (a *Agreement) SetDeadline(actor Party, deadline, now time.Time) error {
 	if !deadline.After(now) {
 		return ErrNotYet
 	}
-	if err := a.append(actor, "deadline", deadline.UTC().Format(time.RFC3339), now); err != nil {
+	note := deadline.UTC().Format(time.RFC3339)
+	recorded, err := time.Parse(time.RFC3339, note)
+	if err != nil {
+		return ErrInvalid
+	}
+	if !recorded.After(now.UTC()) {
+		return ErrNotYet
+	}
+	if err := a.append(actor, "deadline", note, now); err != nil {
 		return err
 	}
 	a.Deadline = deadline.UTC()
@@ -402,6 +453,9 @@ func (a *Agreement) terminal() bool {
 func (a *Agreement) append(actor Party, action, note string, now time.Time) error {
 	if a.steps >= a.Meter.MaxSteps {
 		return ErrDoS
+	}
+	if !validMeterNumbers(a.Meter) {
+		return ErrInvalid
 	}
 	if a.Meter.BudgetUSD > 0 && a.Meter.CostUSD > a.Meter.BudgetUSD {
 		return ErrBudget
@@ -530,14 +584,16 @@ func digestDomain(version int, domain string, v any) []byte {
 	return append([]byte(fmt.Sprintf("nex/nexum/v%d/%s\x00", version, domain)), b...)
 }
 
-// sealedPath is true when public ciphertext, a seal receipt, or a committed
-// sealed mode shows this agreement is not a plaintext escrow. A nil Sealed
-// pointer is not evidence of plaintext: JSON drops that private field.
+// sealedPath is true when public ciphertext, a seal receipt, armed sealed
+// scheme/public key, or a committed sealed mode shows this agreement is not a
+// plaintext escrow. A nil Sealed pointer is not evidence of plaintext: JSON
+// drops that private field.
 func (a *Agreement) sealedPath() bool {
 	if a == nil {
 		return false
 	}
-	if a.Mode == ModeSealed || a.Sealed != nil || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 {
+	if a.Mode == ModeSealed || a.Sealed != nil || a.Scheme != "" || len(a.PublicKey) > 0 ||
+		len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 || len(a.SealedEqualityProof) > 0 {
 		return true
 	}
 	for _, r := range a.Receipts {
@@ -557,6 +613,49 @@ func (a *Agreement) requireExecutableCustody() error {
 	return nil
 }
 
+func validateAgreementTerms(a *Agreement) error {
+	if a == nil {
+		return ErrInvalid
+	}
+	if a.ID == "" || a.Kind == "" {
+		return ErrInvalid
+	}
+	if a.Buyer == "" || a.Seller == "" {
+		return ErrMissingParty
+	}
+	if a.Buyer == a.Seller {
+		return ErrSameParty
+	}
+	if a.Amount <= 0 {
+		return ErrZeroAmount
+	}
+	if !validMeterNumbers(a.Meter) {
+		return ErrInvalid
+	}
+	if a.Format != 0 && a.Format != 1 && a.Format != FormatV2 {
+		return ErrInvalid
+	}
+	if a.Format >= FormatV2 {
+		if a.Mode != ModePlaintext && a.Mode != ModeSealed {
+			return ErrInvalid
+		}
+		if a.Mode == ModePlaintext && (a.Scheme != "" || len(a.PublicKey) > 0 || len(a.SealedLocks) > 0 || len(a.SealedSum) > 0 || len(a.SealedAggregate) > 0 || len(a.SealedEqualityProof) > 0) {
+			return ErrInvalid
+		}
+		if a.Mode == ModeSealed && (a.Scheme != SchemePaillier || len(a.PublicKey) == 0) {
+			return ErrInvalid
+		}
+	} else {
+		if a.Mode != "" {
+			return ErrInvalid
+		}
+		if a.Scheme != "" && a.Scheme != SchemePaillier {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
 // VerifyReceipts checks the hash chain, the terms digest in every link and
 // each actor's signature where present. An error means the ledger was
 // rewritten — its terms or its steps. Each receipt verifies against the
@@ -567,7 +666,11 @@ func (a *Agreement) VerifyReceipts() error {
 	if a == nil || len(a.Receipts) == 0 {
 		return ErrInvalid
 	}
+	if err := validateAgreementTerms(a); err != nil {
+		return err
+	}
 	var prev string
+	var lockedBy string
 	view := *a
 	view.Receipts = nil
 	view.steps = 0
@@ -600,7 +703,7 @@ func (a *Agreement) VerifyReceipts() error {
 			}
 		}
 		prev = r.Hash
-		if err := applyReceiptState(&view, r); err != nil {
+		if err := applyReceiptState(&view, r, &lockedBy); err != nil {
 			return fmt.Errorf("nexum: receipt %d invalid transition: %w", r.Seq, err)
 		}
 		applyMaterialReceipt(&view, r)
@@ -622,7 +725,7 @@ func sameReceiptTime(a, b *time.Time) bool {
 // applyReceiptState derives the public execution state from authenticated
 // actions. Sealed equality-proof validation belongs to the settlement layer;
 // this replay validates the actors and lifecycle that surround that proof.
-func applyReceiptState(a *Agreement, r Receipt) error {
+func applyReceiptState(a *Agreement, r Receipt, lockedBy *string) error {
 	if r.Actor != a.Buyer && r.Actor != a.Seller {
 		return ErrWrongParty
 	}
@@ -638,10 +741,21 @@ func applyReceiptState(a *Agreement, r Receipt) error {
 	}
 	at := r.At.UTC()
 	switch r.Action {
-	case "lock", "seal":
-		if r.Actor != a.Buyer || (r.Action == "lock" && a.Status != StatusOpen) {
+	case "lock":
+		if r.Actor != a.Buyer || a.Status != StatusOpen || a.Mode == ModeSealed || a.Scheme != "" || len(a.PublicKey) > 0 || *lockedBy != "" {
 			return ErrBadState
 		}
+		*lockedBy = "lock"
+		a.Status = StatusLocked
+		a.LockedAt = &at
+	case "seal":
+		if r.Actor != a.Buyer || a.Mode == ModePlaintext {
+			return ErrBadState
+		}
+		if a.Status != StatusOpen && (a.Status != StatusLocked || *lockedBy != "seal") {
+			return ErrBadState
+		}
+		*lockedBy = "seal"
 		a.Status = StatusLocked
 		a.LockedAt = &at
 	case "accept", "reject":
@@ -663,6 +777,9 @@ func applyReceiptState(a *Agreement, r Receipt) error {
 		deadline, err := time.Parse(time.RFC3339, r.Note)
 		if err != nil {
 			return ErrInvalid
+		}
+		if !deadline.After(r.At) {
+			return ErrNotYet
 		}
 		// Historical deadline receipts have second precision. Replay uses the
 		// recorded time without replacing the live snapshot's precise policy.

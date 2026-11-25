@@ -56,19 +56,14 @@ type Council struct {
 
 // SignReceipts arms receipt signatures for council parties.
 func (c *Council) SignReceipts(keys map[Party]ed25519.PrivateKey) error {
-	known := make(map[Party]bool, len(c.Parties))
-	for _, p := range c.Parties {
-		known[p] = true
+	if c == nil {
+		return ErrInvalid
 	}
-	for party, key := range keys {
-		if len(key) != ed25519.PrivateKeySize {
-			return ErrInvalid
-		}
-		if !known[party] {
-			return ErrWrongParty
-		}
+	cloned, err := cloneActorKeys(keys, c.isParty)
+	if err != nil {
+		return err
 	}
-	c.actorKeys = keys
+	c.actorKeys = cloned
 	return nil
 }
 
@@ -133,8 +128,14 @@ func openCouncil(format int, id string, parties []Party, reqs []Requirement, dec
 		r.Citation = ""
 		clean[i] = r
 	}
+	if !validMeterNumbers(meter) {
+		return nil, ErrInvalid
+	}
 	if meter.MaxSteps <= 0 {
 		meter.MaxSteps = 32
+	}
+	if meter.MaxSteps > 128 {
+		return nil, ErrInvalid
 	}
 	c := &Council{
 		ID:        id,
@@ -503,7 +504,7 @@ func (c *Council) classify() (string, error) {
 	if c == nil || len(c.Receipts) == 0 {
 		return "", ErrInvalid
 	}
-	if !validSiblingFormat(c.Format) || c.Kind != KindCouncil {
+	if !validSiblingFormat(c.Format) || c.Kind != KindCouncil || !validMeterNumbers(c.Meter) {
 		return "", ErrInvalid
 	}
 	if err := validateCouncilRoster(c); err != nil {

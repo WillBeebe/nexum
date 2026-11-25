@@ -179,15 +179,35 @@ func decide(i Identity, o Offer, action string, now time.Time, rekey *RekeyPubli
 	if err != nil {
 		return Decision{}, err
 	}
+	if err := o.Verify(); err != nil {
+		return Decision{}, err
+	}
 	if p.ID() != o.Terms.Recipient.ID() {
 		return Decision{}, ErrParty
 	}
-	if !now.Before(o.Terms.ExpiresAt) {
+	if action != "agree" && action != "reject" {
+		return Decision{}, ErrInvalid
+	}
+	at := now.UTC()
+	if !at.Before(o.Terms.ExpiresAt) {
 		return Decision{}, ErrExpired
 	}
-	d := Decision{EnvelopeHash: o.Hash(), Action: action, At: now.UTC(), Rekey: rekey}
+	if at.Before(o.Terms.CreatedAt) {
+		return Decision{}, ErrInvalid
+	}
+	if o.Terms.KeySuite == RekeySuite && action == "agree" {
+		if rekey == nil || rekey.Validate() != nil {
+			return Decision{}, ErrInvalid
+		}
+	} else if rekey != nil {
+		return Decision{}, ErrInvalid
+	}
+	d := Decision{EnvelopeHash: o.Hash(), Action: action, At: at, Rekey: rekey}
 	d.Signature = sign(i, "decision", d.unsigned())
-	return d, d.Verify(o)
+	if err := d.Verify(o); err != nil {
+		return Decision{}, err
+	}
+	return d, nil
 }
 
 type Release struct {
@@ -253,6 +273,9 @@ func (r Record) State(now time.Time) string {
 	}
 	if r.Decision != nil {
 		if r.Decision.Action == "agree" {
+			if r.Offer.Terms.ReleaseBy != nil && !now.Before(*r.Offer.Terms.ReleaseBy) {
+				return "expired"
+			}
 			return "accepted"
 		}
 		return "rejected"
