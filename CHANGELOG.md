@@ -1,5 +1,125 @@
 # Changelog
 
+## v2.0.2
+
+### Evidence-gated collective decisions (`nex.Accord`)
+
+- **`nex.Accord` and `nex.AccordStore`:** Adds an evidence-gated collective
+  decision kernel (`Accord`, `AccordSpec`, `AccordStore`, `AccordBundle`,
+  `VerifyAccordBundle`, and downstream authorizers
+  `AuthorizeProtocolFromAccord`, `CreateProtocolFromAccord`,
+  `AuthorizeTaskFromAccord`, and `AuthorizeDispositionFromAccord`). Supports
+  authenticated multi-role deliberation over competing options, deterministic
+  in-kernel replay of upstream `TaskHandoff` and `ProtocolBundle` proofs into
+  `VerifiedEvidenceFact` records (with `ArtifactRefs` strictly filtered against
+  returned artifacts), weighted/threshold/margin/mandatory-role voting, bounded
+  evidence-cited vetoes, preserved signed dissent, deterministic tie-free
+  resolution, and AES-256-GCM durable checkpointing with exact signed retries.
+- **New runnable example:** Added `examples/accord` (`go run ./examples/accord`)
+  demonstrating evidence-gated release governance over real upstream
+  coordination handoffs, plus unit and adversarial suites (`nex/accord_test.go`,
+  `nex/accord_adversarial_test.go`, `examples/accord/main_test.go`).
+
+### Cryptography, Merkle, L2, PoW, and Keccak hardening
+
+- **Paillier modulus & equality proof soundness (`internal/he`, `internal/settle`):**
+  `NewPaillier` enforces `gcd(N, lambda) == 1`. `FromPublic` rejects empty or
+  leading-zero moduli, enforces `128..1024` bytes (`BitLen >= 1024`), oddness,
+  trial division through `65537`, compositeness, and non-square checks.
+  `ProveEqual` and `VerifyEqual` embed and verify a Gennaro-Micciancio-Rabin
+  coprimality NIZK (`k = 8` deterministic `Z_N^*` roots over domain-separated
+  canonical `N`) closing prime-power modulus equivocation end-to-end across
+  `he`, `settle`, `nexum`, and `l2`.
+- **Transcript framing & canonical encoding (`internal/he`, `internal/settle`):**
+  `zkChallenge` is domain-separated and length-framed with canonical `N.Bytes()`,
+  `ct`, `m`, and `commit`; leading-zero non-canonical encodings on ciphertexts,
+  aggregates, and proof fields are rejected; `zkProof` JSON decoding uses
+  `DisallowUnknownFields` and rejects trailing bytes. `he.RestorePrivate`
+  enforces full modulus checks, Carmichael `lambda` validity, and encrypt/decrypt
+  self-verification.
+- **Merkle root & aggregation (`internal/settle`):** `settle.Root` now applies
+  domain separation across empty, 32-byte hex leaf, length-framed raw leaf,
+  internal node, and leaf-count-committed final digests (closing odd-leaf
+  duplication, leaf/internal, hex-split, and empty-slice collisions).
+  `EncryptedLedger.Aggregate` validates ciphertext group membership and returns
+  a defensive copy on single-lock inputs.
+- **L2, PoW, and Keccak (`internal/l2`, `internal/pow`, `quarry/keccak`):**
+  `l2.Root`, `l2.Seal`, `l2.Verify`, and `l2.VerifyBatch` reject empty batches
+  and non-positive difficulty floors (`bits < 1` / `minBits < 1` / `DiffBits < 1`).
+  `pow.Header.Hash` encodes full 64-bit `DiffBits`. Vendored `quarry/keccak`
+  `UnmarshalBinary` rejects `n >= d.rate` in `spongeAbsorbing` state and
+  validates into a local buffer before mutating receiver state.
+
+### Agreement kernel and encrypted message hardening
+
+- **Sealed settlement & custody (`internal/nexum`):** `PublicSealedProof` and
+  `VerifySealedSettlement` require `StatusAccepted`, valid receipt chains, and
+  binding of `SealedEqualityProof` to the `"accept"` receipt commitment.
+  `WithUnitAt` enforces private custody; Format-1 `StartSealed` snapshots detect
+  `Scheme`/`PublicKey` so decoded snapshots cannot downgrade to plaintext `Lock`
+  or overwrite `PublicKey`.
+- **Receipt replay, keys, and metering (`internal/nexum`):**
+  `Agreement.VerifyReceipts` validates binding terms (`ID`, `Kind`, distinct
+  non-empty parties, `Amount > 0`, valid `Format`/`Mode`), mode-consistent
+  lock/seal transitions (forbidding mixed `lock`+`seal`), and future deadlines;
+  `OpenAgreement`, `OpenAgreementV2`, and `OpenEscrow` reject empty `id`.
+  `SignReceipts` across `Agreement`, `Council`, `Delegate`, and `Workflow`
+  verifies Ed25519 seed/public-key consistency and deep-clones caller key maps
+  and slices. IEEE-754 `NaN`/`Inf` meter values are rejected everywhere;
+  `OpenCouncil`, `OpenDelegate`, and `OpenWorkflow` enforce `MaxSteps <= 128`;
+  Format-0 `Workflow` deduplicates `Node.Next` edges during replay.
+- **Encrypted messages (`internal/message`):** `VerifyConversationOrder` enforces
+  consistent `ConversationID`, non-dangling `ReplyTo`, `ReplyChain`-to-`ReplyTo`
+  binding, and duplicate/cycle rejection. `ValidateTradeSuccessor` verifies
+  parent/child signatures, `"agree"` decision, and `ReplyChain`. `Decide`
+  validates `Offer.Verify()` before signing and returns a zero `Decision` on
+  error. `Record.State(now)` reports `"expired"` at or after `ReleaseBy`.
+
+### Protocol, coordination, and contract hardening
+
+- **Protocol canonicalization & validation (`nex`):** `NewProtocol` and
+  `Protocol.Apply` enforce valid UTF-8 on all v1/v2 spec and command strings
+  before and after `cloneProtocol` so invalid UTF-8 cannot expand or coalesce
+  and brick `ProtocolStore`. `Protocol.Apply` verifies signatures and
+  `ProtocolID` (`ErrProtocolStale`) before `(Actor, RequestID)` conflict lookup.
+  `validateReturn` compares `Resources` order-insensitively with `nil` equal to
+  `[]ResourceUse{}`.
+- **Coordination discovery & bilateral contracts (`nex`):**
+  `CoordinationStore.DiscoverGoal` no longer swallows `ErrCorruptStore` or runs
+  redundant Pass-2 `s.Result` lookups/locks on Pass-1 unclaimed tasks, preserving
+  internally consistent snapshots. `nex.New` validates UTF-8/non-NUL `kind`,
+  rejects shared Ed25519 signing keys (`ErrSameParty`), normalizes `now` and
+  `deadline` to `.UTC()`, and validates RFC3339 year bounds `[0, 9999]` before
+  hashing. `Contract.rebuildConsent` verifies `r.Actor == Seller`.
+
+### Durable adapter, fencing, outbox, and effect safety
+
+- **SQL & durable fence coordinators (`adapter`):** `SQLCoordinator.Authorize`
+  on SQLite now acquires the immediate write lock via `AuthorizeTx` across `fn()`,
+  closing multi-handle/multi-process split-brain races. `SQLCoordinator` seals a
+  genesis token at `generation == 0` and unconditionally verifies AES-256-GCM
+  tags on all read, write, and authorize paths, plus adds nil-receiver checks on
+  `StopAndFenceContext`/`ConfirmFenceProofContext`. `DurableCoordinator` releases
+  `coordinator.lock` before invoking `EpochSealer.SealFenceEpoch`.
+  `HandoffCoordinatorDir` enforces exported `HandoffReady` (fence proof and
+  non-empty checkpoint head) even across wrapped coordinators. `CopyPrivateDir`
+  resolves symlinks (`os.SameFile` / subpath checks) and rejects non-empty
+  destinations before modifying files.
+- **Outbox, vault, and effect isolation (`adapter`):** `EffectAdapter` isolates
+  records to `*.effect` with distinct AAD so shared vault directories never brick
+  or overwrite `Outbox` `*.box` records. `validateID` rejects NUL bytes and
+  length-frames `recordID` and `EffectRef.slot()`. `Outbox.SealAdmission`
+  validates generation under lock before latching stopped state and syncs across
+  handles on `ResumeAdmission`. `Outbox.Reconcile` rejects invalid/error
+  candidates and clears stale candidates on `StatusUnknown`; `validateItem` and
+  authorities enforce `payload.Kind == item.Kind`; duplicate `Enqueue` rejects
+  metadata conflicts; `ReconcileDue` checks `NextTry` atomically under lock;
+  `sameTerminal` includes `Phase`, `WorkOutcome`, and `Definitive`.
+  `EffectAdapter` preserves `EffectPhaseUnknown` / `Reconcile = true` when a
+  retry returns `OutcomeNotDispatched` after a prior uncertain attempt.
+- **Regression suites:** Added 14 `-race` `*_v202_regression_test.go` suites
+  covering all 44 verified fixes across all 9 affected packages.
+
 ## v2.0.1
 
 ### Concurrency & multi-planner scale fixes

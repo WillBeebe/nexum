@@ -1,4 +1,4 @@
-# Collaboration examples — Nexum v2.0.1
+# Collaboration examples — Nexum v2.0.2
 
 Run from the repository root with Go 1.25 or newer:
 
@@ -11,6 +11,7 @@ go run ./examples/collective-fund
 go run ./examples/return-handoff
 go run ./examples/reconcile-handoff
 go run ./examples/coordination
+go run ./examples/accord
 go test -race ./examples/...
 ```
 
@@ -24,12 +25,17 @@ These local examples need no model keys or hosted service. State is lost on
 restart, keys remain in process, and external resource enforcement is the
 application's responsibility. See the technical design and changelog.
 
-## Restart and retry integration
+## Restart, coordination, and accord integration
 
 Run `go run ./examples/durable-retry` to exercise the Store API.
 It reopens encrypted local state and retries the same signed operation without
 adding receipts. `go run ./examples/return-handoff` completes a failed attempt
 with preserved dissent. `go run ./examples/reconcile-handoff` loses a transport
 response, records that failure honestly, and refuses the old owner after a
-stopped-writer handoff. Read [durable agreements](../docs/DURABLE_AGREEMENTS.md)
-for application key management and outbox requirements.
+stopped-writer handoff. `go run ./examples/coordination` executes a multi-task
+DAG and verifies portable `TaskHandoff` proofs. `go run ./examples/accord`
+layers an evidence-gated `nex.Accord` / `AccordStore` release decision over
+upstream handoffs, verifying weighted voting, bounded veto, preserved dissent,
+and offline `VerifyAccordBundle` replay. Read
+[durable agreements](../docs/DURABLE_AGREEMENTS.md) for application key
+management and outbox requirements.

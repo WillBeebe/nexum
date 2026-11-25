@@ -153,6 +153,14 @@ not persist expiry. Height zero is refused. A checkpoint may retain incomplete
 history and at most one accepted task result. An attempt completion is evidence.
 It does not by itself select the task result.
 
+`AccordStore` uses the same AES-256-GCM checkpointing, OS `flock` serialization,
+bounded authenticated cache, and exact signed retry semantics for `nex.Accord`
+collective decisions. Re-applying an already-committed signed `AccordCommand`
+returns the original receipt hash across restarts without mutating state, while
+reusing a request ID with different content fails with `ErrOperationConflict`.
+Run `go run ./examples/accord` for a local end-to-end demonstration over real
+upstream coordination handoffs.
+
 ## What remains outside this guarantee
 
 - The sender's durable outbox and index of contract IDs are application-owned.
@@ -165,10 +173,12 @@ It does not by itself select the task result.
   OS `flock` (`coordinator.lock`), recovering crash-safe monotonic generations
   (`Issue` is refused once `Generation >= 1`); and `SQLCoordinator`
   (`OpenSQLCoordinator`) stores AEAD-sealed leases in a shared SQL table
-  (`nex_fence_leases`) over `database/sql`, pairing `AuthorizeTx` (`FOR SHARE`
-  inside the destination's PostgreSQL transaction) with `StopAndFence`
-  (`FOR UPDATE`) so all in-flight destination writes finish before fence proof
-  is recorded. Both durable coordinators support `EpochSealer`
+  (`nex_fence_leases`) over `database/sql` (verifying AES-256-GCM tags across
+  every read, write, and authorize path, including genesis generation 0),
+  pairing `Authorize` / `AuthorizeTx` (PostgreSQL `FOR SHARE` and SQLite
+  immediate write locks) with `StopAndFence` (`FOR UPDATE` / immediate write
+  lock) so all in-flight destination writes finish before fence proof is
+  recorded. Both durable coordinators support `EpochSealer`
   (`StopAndFence` / `ConfirmFenceProof`) to seal external destinations before
   activating a replacement owner. Restoring an isolated offline full-VM or
   full-directory snapshot that rolls back both local `Store`/`Vault` files and a

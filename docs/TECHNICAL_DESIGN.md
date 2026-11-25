@@ -264,7 +264,28 @@ Paillier keys even though equality verification does not decrypt.
 
 These state machines are implemented, but authenticated public `nex` adapters
 for them are not yet supplied. Exposing raw actor strings would omit identity
-verification; a service must provide an authorization layer first.
+verification; a service must provide an authorization layer first. For
+authenticated multi-agent collective decisions gated by replayed upstream
+evidence, use the public `nex.Accord` / `nex.AccordStore` API (see
+`examples/accord`).
+
+### Accord: evidence-gated collective decisions (`nex`)
+
+`nex.Accord` provides a public, Ed25519-authenticated deliberation kernel over
+competing options bound to downstream commitments (`BindingProtocolSpec`,
+`BindingTaskSpec`, or `BindingDisposition`). Participants hold scoped
+`AccordRoleGrant` permissions (`propose`, `attest`, `vote`, `veto`, `resolve`).
+`attest` replays wire-decoded `TaskHandoff` and `ProtocolBundle` proofs inside
+the kernel to derive `VerifiedEvidenceFact` records whose `ArtifactRefs` are
+strictly filtered against returned artifacts. Option guards evaluate verified
+outcomes, artifact slots, and witness dissent (`GuardNoWitnessDissent` fails
+closed on incomplete or unwitnessed handoffs). Resolution enforces weighted
+thresholds, margins, mandatory roles, bounded evidence-cited vetoes, preserved
+signed dissent, and deterministic tie-free selection. `VerifyAccordBundle` and
+downstream authorizers (`AuthorizeProtocolFromAccord`,
+`CreateProtocolFromAccord`, `AuthorizeTaskFromAccord`,
+`AuthorizeDispositionFromAccord`) verify exported bundles offline without
+private keys or source stores.
 
 ### Council: requirements, unanimous consent, execution
 
@@ -364,12 +385,15 @@ sequencing, hashes, embedded signatures when present, and replayed snapshot
 outcomes. The `sealed-settlement` profile (`l2.ProfileSealedSettlement`)
 requires a `SealedProofBundle` built by `Agreement.PublicSealedProof()`.
 `nexum.VerifySealedProofBundle` and `l2.VerifySealed` check the public Paillier
-group membership, ciphertext SHA-256 commitments (at most 128 locks),
-homomorphic aggregate, and equality proof against the public amount without
-Paillier private factors or encryption randomness.
-`Agreement.VerifySealedSettlement` binds that verified bundle to the
-agreement's verified receipt chain, ordered `seal` notes, terms digest, and
-receipt head. Missing proof material is refused rather than downgraded; a
+modulus validity (canonical encoding, size, compositeness, small-factor,
+non-square, and Gennaro-Micciancio-Rabin coprimality NIZK), group membership,
+ciphertext SHA-256 commitments (at most 128 locks), homomorphic aggregate, and
+domain-separated equality proof against the public amount without Paillier
+private factors or encryption randomness.
+`Agreement.VerifySealedSettlement` requires `StatusAccepted` and binds that
+verified bundle to the agreement's verified receipt chain, `"accept"` receipt
+equality-proof commitment, ordered `seal` notes, terms digest, and receipt
+head. Missing proof material is refused rather than downgraded; a
 `receipt-chain` success is not a `sealed-settlement` success.
 
 The public client exposes a head and verification operation, not a complete
