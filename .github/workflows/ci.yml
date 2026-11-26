@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  verify:
+    name: Verify (Go 1.25)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Check gofmt formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "The following Go files are not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Run 5-second fuzz smoke tests
+        run: |
+          set -euo pipefail
+          go test -run=^$ -fuzz=^FuzzVerifyAccordBundle$ -fuzztime=5s ./nex
+          go test -run=^$ -fuzz=^FuzzVerifyTaskHandoff$ -fuzztime=5s ./nex
+          go test -run=^$ -fuzz=^FuzzProtocolApply$ -fuzztime=5s ./nex
+          go test -run=^$ -fuzz=^FuzzVerifySealedSettlement$ -fuzztime=5s ./internal/nexum
+          go test -run=^$ -fuzz=^FuzzDecodePayload$ -fuzztime=5s ./adapter
+
+      - name: Run CLI demo and all runnable examples
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          echo "=== Running ./cmd/nex demo ==="
+          go run ./cmd/nex demo
+          count=0
+          for main in examples/*/main.go; do
+            dir="./$(dirname "$main")"
+            echo "=== Running $dir ==="
+            go run "$dir"
+            count=$((count + 1))
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "No runnable examples found under examples/*/main.go"
+            exit 1
+          fi
+          echo "Ran $count examples successfully."
+
+      - name: Verify documentation site build
+        run: |
+          set -euo pipefail
+          trap 'rm -rf site/dist' EXIT
+          python3 site/build.py
+          for asset in index.html style.css site.js agents.md favicon.png favicon.ico; do
+            test -s "site/dist/$asset"
+          done
+
+      - name: Verify SOURCE_MANIFEST.json completeness and SHA-256 digests
+        run: |
+          python3 - <<'EOF'
+          import hashlib
+          import json
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          manifest_path = Path("SOURCE_MANIFEST.json")
+          try:
+              entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+          except Exception as exc:
+              sys.exit(f"Failed to parse {manifest_path}: {exc}")
+
+          if not isinstance(entries, list):
+              sys.exit("SOURCE_MANIFEST.json must be a JSON array")
+
+          hex64 = re.compile(r"^[0-9a-f]{64}$")
+          manifest_map = {}
+          seen_order = []
+          errors = []
+
+          for idx, entry in enumerate(entries):
+              if not isinstance(entry, dict) or set(entry.keys()) != {"path", "sha256"}:
+                  errors.append(f"entry[{idx}] must have exact keys 'path' and 'sha256'")
+                  continue
+              rel = entry["path"]
+              digest = entry["sha256"]
+              if not isinstance(rel, str) or not rel:
+                  errors.append(f"entry[{idx}] has invalid path: {rel!r}")
+                  continue
+              if not isinstance(digest, str) or not hex64.match(digest):
+                  errors.append(f"entry[{idx}] ({rel}) has invalid sha256: {digest!r}")
+                  continue
+              if rel in manifest_map:
+                  errors.append(f"duplicate manifest entry: {rel}")
+                  continue
+              manifest_map[rel] = digest
+              seen_order.append(rel)
+
+          if seen_order != sorted(seen_order):
+              errors.append("SOURCE_MANIFEST.json entries are not sorted lexicographically by path")
+
+          raw_tracked = subprocess.check_output(["git", "ls-files", "-z"])
+          tracked = {
+              p.decode("utf-8") for p in raw_tracked.split(b"\0") if p
+          } - {"SOURCE_MANIFEST.json"}
+
+          missing = sorted(tracked - set(manifest_map))
+          extra = sorted(set(manifest_map) - tracked)
+          if missing:
+              errors.append("tracked files missing from SOURCE_MANIFEST.json:\n  " + "\n  ".join(missing))
+          if extra:
+              errors.append("SOURCE_MANIFEST.json entries not tracked by git:\n  " + "\n  ".join(extra))
+
+          for rel, expected in sorted(manifest_map.items()):
+              p = Path(rel)
+              if not p.is_file():
+                  errors.append(f"manifest file missing on disk: {rel}")
+                  continue
+              actual = hashlib.sha256(p.read_bytes()).hexdigest()
+              if actual != expected:
+                  errors.append(f"sha256 mismatch for {rel}: manifest={expected} actual={actual}")
+
+          if errors:
+              sys.exit("SOURCE_MANIFEST.json verification failed:\n" + "\n".join(errors))
+
+          print(f"Verified {len(manifest_map)} SOURCE_MANIFEST.json entries (complete & SHA-256 matched).")
+          EOF
