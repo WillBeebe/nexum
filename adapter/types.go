@@ -22,6 +22,7 @@ type Kind string
 const (
 	KindAgreement Kind = "agreement"
 	KindProtocol  Kind = "protocol"
+	KindAccord    Kind = "accord"
 )
 
 type ResultKind string
