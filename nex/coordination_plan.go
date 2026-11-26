@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"slices"
 	"sync/atomic"
@@ -310,9 +309,9 @@ func (s *GoalStore) Stats() StoreStats {
 	return s.store.Stats()
 }
 
-func (s *GoalStore) load(id string) (goalRecord, error) {
+func (s *GoalStore) loadWith(tx checkpointTx, id string) (goalRecord, error) {
 	var record goalRecord
-	raw, err := s.store.readEncrypted(id)
+	raw, _, err := s.store.readEncryptedWithMeta(tx, id)
 	if err != nil {
 		return record, err
 	}
@@ -331,16 +330,18 @@ func (s *GoalStore) Create(spec GoalSpec) (string, error) {
 	}
 	record := newGoalRecord(spec)
 	id := record.Plan.Head
-	err := s.store.withLock(id, func() error {
-		if _, err := os.Lstat(s.store.path(id)); err == nil {
-			if _, err := s.load(id); err != nil {
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		exists, err := tx.exists(id)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if _, err := s.loadWith(tx, id); err != nil {
 				return err
 			}
 			return s.confirmPlan()
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
 		}
-		return s.store.write(id, record)
+		return s.store.writeWith(tx, id, record)
 	})
 	return id, err
 }
@@ -356,8 +357,8 @@ func (s *GoalStore) confirmPlan() error {
 // resends return their original revision head even after later revisions.
 func (s *GoalStore) Apply(rev PlanRevision, signature []byte) (string, error) {
 	var head string
-	err := s.store.withLock(rev.GoalID, func() error {
-		record, err := s.load(rev.GoalID)
+	err := s.store.withLocked(rev.GoalID, func(tx checkpointTx) error {
+		record, err := s.loadWith(tx, rev.GoalID)
 		if err != nil {
 			return err
 		}
@@ -369,7 +370,7 @@ func (s *GoalStore) Apply(rev PlanRevision, signature []byte) (string, error) {
 		if !advanced {
 			return s.confirmPlan()
 		}
-		return s.store.write(rev.GoalID, record)
+		return s.store.writeWith(tx, rev.GoalID, record)
 	})
 	return head, err
 }
@@ -383,8 +384,8 @@ func (s *GoalStore) Task(goalID, taskID string) (TaskSpec, error) {
 	}
 	s.store.cacheMisses.Add(1)
 	var task TaskSpec
-	err := s.store.withLock(goalID, func() error {
-		record, err := s.load(goalID)
+	err := s.store.withLocked(goalID, func(tx checkpointTx) error {
+		record, err := s.loadWith(tx, goalID)
 		if err != nil {
 			return err
 		}
@@ -419,8 +420,8 @@ func detachedTask(task TaskSpec, goalID, taskID string) (TaskSpec, error) {
 
 func (s *GoalStore) View(goalID string) (GoalPlan, error) {
 	var plan GoalPlan
-	err := s.store.withLock(goalID, func() error {
-		record, err := s.load(goalID)
+	err := s.store.withLocked(goalID, func(tx checkpointTx) error {
+		record, err := s.loadWith(tx, goalID)
 		if err != nil {
 			return err
 		}

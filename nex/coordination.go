@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"sync"
 )
@@ -55,8 +54,8 @@ type taskCheckpoint struct {
 }
 
 type cachedTaskCheckpoint struct {
-	info        os.FileInfo
-	plainDigest [32]byte // SHA-256 of AES-256-GCM-authenticated taskCheckpoint JSON read under s.store.withLock(taskID)
+	meta        checkpointMeta
+	plainDigest [32]byte // SHA-256 of AES-256-GCM-authenticated taskCheckpoint JSON read under s.store.withLocked(taskID)
 	state       taskCheckpoint
 }
 
@@ -129,8 +128,8 @@ func deriveTaskStatus(state taskCheckpoint, height uint64) string {
 	return "reclaimable"
 }
 
-func (s *CoordinationStore) load(goalID, taskID string) (taskCheckpoint, error) {
-	raw, err := s.store.readEncrypted(taskID)
+func (s *CoordinationStore) loadWith(tx checkpointTx, goalID, taskID string) (taskCheckpoint, error) {
+	raw, _, err := s.store.readEncryptedWithMeta(tx, taskID)
 	if err != nil {
 		return taskCheckpoint{}, err
 	}
@@ -142,18 +141,11 @@ func (s *CoordinationStore) load(goalID, taskID string) (taskCheckpoint, error) 
 	return state, nil
 }
 
-// loadAuthenticatedCached authenticates current stored ciphertext bytes under s.store.withLock(taskID)
-// before consulting s.cache. Cached deserialization/validation is reused ONLY when both file identity
-// and AES-256-GCM-authenticated plaintext SHA-256 match.
-func (s *CoordinationStore) loadAuthenticatedCached(goalID, taskID string) (state taskCheckpoint, fromCache bool, err error) {
-	info, err := os.Lstat(s.store.path(taskID))
-	if errors.Is(err, os.ErrNotExist) {
-		return taskCheckpoint{}, false, ErrNotFound
-	}
-	if err != nil {
-		return taskCheckpoint{}, false, err
-	}
-	plainJSON, err := s.store.readEncrypted(taskID)
+// loadAuthenticatedCached authenticates current stored ciphertext bytes under s.store.withLocked(taskID)
+// before consulting s.cache. Cached deserialization/validation is reused ONLY when both checkpoint identity
+// (file metadata or SQL version) and AES-256-GCM-authenticated plaintext SHA-256 match.
+func (s *CoordinationStore) loadAuthenticatedCached(tx checkpointTx, goalID, taskID string) (state taskCheckpoint, fromCache bool, err error) {
+	plainJSON, meta, err := s.store.readEncryptedWithMeta(tx, taskID)
 	if err != nil {
 		return taskCheckpoint{}, false, err
 	}
@@ -161,7 +153,7 @@ func (s *CoordinationStore) loadAuthenticatedCached(goalID, taskID string) (stat
 	s.mu.Lock()
 	entry, hit := s.cache[taskID]
 	s.mu.Unlock()
-	if hit && os.SameFile(entry.info, info) && entry.info.ModTime().Equal(info.ModTime()) && entry.info.Size() == info.Size() && entry.plainDigest == plainDigest {
+	if hit && entry.meta.same(meta) && entry.plainDigest == plainDigest {
 		s.store.cacheHits.Add(1)
 		return cloneTaskCheckpoint(entry.state), true, nil
 	}
@@ -193,7 +185,7 @@ func (s *CoordinationStore) loadAuthenticatedCached(goalID, taskID string) (stat
 		s.cacheOrder = append(s.cacheOrder, taskID)
 	}
 	s.cache[taskID] = cachedTaskCheckpoint{
-		info:        info,
+		meta:        meta,
 		plainDigest: plainDigest,
 		state:       cloneTaskCheckpoint(state),
 	}
@@ -240,8 +232,8 @@ func (s *CoordinationStore) confirm() error {
 // Claim uses its generation for comparison. A missing record starts at zero.
 func (s *CoordinationStore) Current(goalID, taskID string) (TaskLease, error) {
 	var lease TaskLease
-	err := s.store.withLock(taskID, func() error {
-		state, err := s.load(goalID, taskID)
+	err := s.store.withLocked(taskID, func(tx checkpointTx) error {
+		state, err := s.loadWith(tx, goalID, taskID)
 		if err != nil {
 			return err
 		}
@@ -261,8 +253,8 @@ func (s *CoordinationStore) StatusAt(goalID, taskID string, height uint64) (stri
 		return "", ErrTaskStale
 	}
 	var status string
-	err := s.store.withLock(taskID, func() error {
-		state, err := s.load(goalID, taskID)
+	err := s.store.withLocked(taskID, func(tx checkpointTx) error {
+		state, err := s.loadWith(tx, goalID, taskID)
 		if err != nil {
 			return err
 		}
@@ -303,8 +295,8 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 	for _, t := range tasks {
 		tid := t.ID()
 		d := TaskDiscovery{Task: t, TaskID: tid, Status: "unclaimed"}
-		err := s.store.withLock(tid, func() error {
-			loaded, fromCache, err := s.loadAuthenticatedCached(goalID, tid)
+		err := s.store.withLocked(tid, func(tx checkpointTx) error {
+			loaded, fromCache, err := s.loadAuthenticatedCached(tx, goalID, tid)
 			if errors.Is(err, ErrNotFound) {
 				return nil
 			}
@@ -368,8 +360,8 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 // after another generation has claimed the task.
 func (s *CoordinationStore) Result(goalID, taskID, protocolID string) (TaskResult, error) {
 	var result TaskResult
-	err := s.store.withLock(taskID, func() error {
-		state, err := s.load(goalID, taskID)
+	err := s.store.withLocked(taskID, func(tx checkpointTx) error {
+		state, err := s.loadWith(tx, goalID, taskID)
 		if err != nil {
 			return err
 		}
@@ -463,8 +455,8 @@ func (s *CoordinationStore) Claim(request ClaimRequest, signature []byte, spec P
 		return lease, err
 	}
 	claimHash := Hash(request)
-	err = s.store.withLock(request.TaskID, func() error {
-		state, err := s.load(request.GoalID, request.TaskID)
+	err = s.store.withLocked(request.TaskID, func(tx checkpointTx) error {
+		state, err := s.loadWith(tx, request.GoalID, request.TaskID)
 		if errors.Is(err, ErrNotFound) {
 			state = taskCheckpoint{Version: taskCheckpointVersion, Results: make(map[string]TaskResult)}
 		} else if err != nil {
@@ -497,10 +489,10 @@ func (s *CoordinationStore) Claim(request ClaimRequest, signature []byte, spec P
 
 		// Create the agreement first. If the task write is interrupted, a retry
 		// can reuse that exact agreement. An orphan cannot finalize a task.
-		if _, err := s.attempts.Create(spec); err != nil && !errors.Is(err, ErrExists) {
+		if _, err := s.attempts.createWithParent(tx, spec); err != nil && !errors.Is(err, ErrExists) {
 			return err
 		}
-		if _, err := s.attempts.View(request.ProtocolID); err != nil {
+		if _, err := s.attempts.viewWithParent(tx, request.ProtocolID); err != nil {
 			return err
 		}
 		lease = TaskLease{
@@ -513,7 +505,7 @@ func (s *CoordinationStore) Claim(request ClaimRequest, signature []byte, spec P
 		s.mu.Lock()
 		delete(s.cache, request.TaskID)
 		s.mu.Unlock()
-		if err := s.store.write(request.TaskID, state); err != nil {
+		if err := s.store.writeWith(tx, request.TaskID, state); err != nil {
 			return err
 		}
 		return nil
@@ -536,8 +528,8 @@ func (s *CoordinationStore) Finalize(lease TaskLease, expectedHead string, heigh
 	if err != nil {
 		return result, err
 	}
-	err = s.store.withLock(lease.TaskID, func() error {
-		state, err := s.load(lease.GoalID, lease.TaskID)
+	err = s.store.withLocked(lease.TaskID, func(tx checkpointTx) error {
+		state, err := s.loadWith(tx, lease.GoalID, lease.TaskID)
 		if err != nil {
 			return err
 		}
@@ -551,7 +543,7 @@ func (s *CoordinationStore) Finalize(lease TaskLease, expectedHead string, heigh
 		if state.Lease != lease || height >= lease.LeaseUntilHeight {
 			return ErrTaskStale
 		}
-		view, err := s.attempts.View(lease.ProtocolID)
+		view, err := s.attempts.viewWithParent(tx, lease.ProtocolID)
 		if err != nil {
 			return err
 		}
@@ -573,7 +565,7 @@ func (s *CoordinationStore) Finalize(lease TaskLease, expectedHead string, heigh
 		s.mu.Lock()
 		delete(s.cache, lease.TaskID)
 		s.mu.Unlock()
-		if err := s.store.write(lease.TaskID, state); err != nil {
+		if err := s.store.writeWith(tx, lease.TaskID, state); err != nil {
 			return err
 		}
 		return nil

@@ -3,9 +3,7 @@ package nex
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"unicode/utf8"
 )
@@ -21,7 +19,7 @@ type storedAccord struct {
 }
 
 type cachedAccord struct {
-	info            os.FileInfo
+	meta            checkpointMeta
 	plainDigest     [32]byte
 	spec            AccordSpec
 	events          []AccordEvent
@@ -59,16 +57,9 @@ func (s *AccordStore) Stats() StoreStats {
 	return s.store.Stats()
 }
 
-// loadLocked authenticates and loads accord id; callers MUST hold s.store.withLock(id, ...).
-func (s *AccordStore) loadLocked(id string) (*Accord, error) {
-	info, err := os.Lstat(s.store.path(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	plainJSON, err := s.store.readEncrypted(id)
+// loadLocked authenticates and loads accord id; callers MUST hold s.store.withLocked(id, ...).
+func (s *AccordStore) loadLocked(tx checkpointTx, id string) (*Accord, error) {
+	plainJSON, meta, err := s.store.readEncryptedWithMeta(tx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +71,7 @@ func (s *AccordStore) loadLocked(id string) (*Accord, error) {
 	s.mu.Lock()
 	entry, hit := s.cache[id]
 	s.mu.Unlock()
-	if hit && os.SameFile(entry.info, info) && entry.info.ModTime().Equal(info.ModTime()) &&
-		entry.info.Size() == info.Size() && entry.plainDigest == plainDigest {
+	if hit && entry.meta.same(meta) && entry.plainDigest == plainDigest {
 		s.store.cacheHits.Add(1)
 		return restoreCachedAccord(entry), nil
 	}
@@ -120,12 +110,12 @@ func (s *AccordStore) loadLocked(id string) (*Accord, error) {
 		}
 		s.cacheOrder = append(s.cacheOrder, id)
 	}
-	s.cache[id] = snapshotCachedAccord(info, plainDigest, a)
+	s.cache[id] = snapshotCachedAccord(meta, plainDigest, a)
 	s.mu.Unlock()
 	return a, nil
 }
 
-func snapshotCachedAccord(info os.FileInfo, plainDigest [32]byte, a *Accord) cachedAccord {
+func snapshotCachedAccord(meta checkpointMeta, plainDigest [32]byte, a *Accord) cachedAccord {
 	evMap := make(map[string]EvidenceSlot, len(a.evidenceByID))
 	for k, v := range a.evidenceByID {
 		evMap[k] = v
@@ -139,7 +129,7 @@ func snapshotCachedAccord(info os.FileInfo, plainDigest [32]byte, a *Accord) cac
 		rwMap[k] = v
 	}
 	return cachedAccord{
-		info:            info,
+		meta:            meta,
 		plainDigest:     plainDigest,
 		spec:            cloneAccordSpec(a.spec),
 		events:          cloneAccordEvents(a.events),
@@ -187,14 +177,16 @@ func (s *AccordStore) Create(spec AccordSpec) (string, error) {
 		return "", err
 	}
 	v := a.View()
-	err = s.store.withLock(v.ID, func() error {
-		if _, err := os.Lstat(s.store.path(v.ID)); err == nil {
-			return ErrExists
-		} else if !errors.Is(err, os.ErrNotExist) {
+	err = s.store.withLocked(v.ID, func(tx checkpointTx) error {
+		exists, err := tx.exists(v.ID)
+		if err != nil {
 			return err
 		}
+		if exists {
+			return ErrExists
+		}
 		s.invalidateCacheLocked(v.ID)
-		return s.store.write(v.ID, storedAccord{
+		return s.store.writeWith(tx, v.ID, storedAccord{
 			Version: accordStoreVersion,
 			Bundle:  a.Bundle(),
 			Head:    v.Head,
@@ -203,11 +195,11 @@ func (s *AccordStore) Create(spec AccordSpec) (string, error) {
 	return v.ID, err
 }
 
-// View returns a durable, detached AccordView after confirming directory sync.
+// View returns a durable, detached AccordView after confirming durability.
 func (s *AccordStore) View(id string) (AccordView, error) {
 	var v AccordView
-	err := s.store.withLock(id, func() error {
-		a, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		a, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -239,12 +231,12 @@ func (s *AccordStore) Prepare(id, actor, grant, scope, action, requestID string,
 }
 
 // Apply verifies and durably commits one signed AccordCommand. Exact retries of
-// already-committed signed commands confirm directory durability and return
+// already-committed signed commands confirm durability and return
 // their original receipt hash without overwriting the current checkpoint.
 func (s *AccordStore) Apply(id string, cmd AccordCommand, signature []byte, height uint64) (string, error) {
 	var head string
-	err := s.store.withLock(id, func() error {
-		a, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		a, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -261,7 +253,7 @@ func (s *AccordStore) Apply(id string, cmd AccordCommand, signature []byte, heig
 			return nil
 		}
 		s.invalidateCacheLocked(id)
-		return s.store.write(id, storedAccord{
+		return s.store.writeWith(tx, id, storedAccord{
 			Version: accordStoreVersion,
 			Bundle:  a.Bundle(),
 			Head:    v.Head,
@@ -270,11 +262,11 @@ func (s *AccordStore) Apply(id string, cmd AccordCommand, signature []byte, heig
 	return head, err
 }
 
-// Export confirms directory durability and returns a detached offline-verifiable AccordBundle.
+// Export confirms durability and returns a detached offline-verifiable AccordBundle.
 func (s *AccordStore) Export(id string) (AccordBundle, error) {
 	var b AccordBundle
-	err := s.store.withLock(id, func() error {
-		a, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		a, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -287,12 +279,12 @@ func (s *AccordStore) Export(id string) (AccordBundle, error) {
 	return b, err
 }
 
-// Transact executes multiple signed steps atomically under the per-accord OS
+// Transact executes multiple signed steps atomically under the per-accord
 // lock, persisting at most one checkpoint replacement if the head advances.
 func (s *AccordStore) Transact(id string, height uint64, steps ...AccordStep) (AccordView, error) {
 	var out AccordView
-	err := s.store.withLock(id, func() error {
-		a, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		a, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -321,7 +313,7 @@ func (s *AccordStore) Transact(id string, height uint64, steps ...AccordStep) (A
 			return nil
 		}
 		s.invalidateCacheLocked(id)
-		if err := s.store.write(id, storedAccord{
+		if err := s.store.writeWith(tx, id, storedAccord{
 			Version: accordStoreVersion,
 			Bundle:  a.Bundle(),
 			Head:    v.Head,
