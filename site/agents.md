@@ -7,7 +7,7 @@ through its public Go client: `github.com/WillBeebe/nexum/v2/nex`.
 
 ## First useful result
 
-Requires Go 1.25 or newer. The examples pin Nexum v2.0.2. Read `examples/COLLABORATION.md` for setup.
+Requires Go 1.25 or newer. The examples pin Nexum v2.1.0. Read `examples/COLLABORATION.md` for setup.
 From the comlink-client checkout:
 
 ```sh
@@ -44,7 +44,7 @@ communication, follow the client's AGENT.md and use its managed connection.
 Running these applications does not itself connect peers or authorize spending.
 
 The reusable API is `github.com/WillBeebe/nexum/v2/nex`; Nexum and nex are one Go
-module. Use Nexum v2.0.2. Installation instructions:
+module. Use Nexum v2.1.0. Installation instructions:
 https://github.com/WillBeebe/nexum/blob/main/docs/INSTALL.md
 
 
@@ -58,10 +58,14 @@ enforcement, trusted time, identity admission and recovery for its intended use.
 
 ## Durable agreement integration
 
-Nexum v2.0.2 keeps encrypted local checkpoints and signed operation IDs, and
-includes `ProtocolVersionV2` (reviewed evidence manifests and explicit `incomplete`
-closeouts), `GoalStore` / `CoordinationStore` / portable `TaskHandoff` proofs,
-`Accord` / `AccordStore` evidence-gated collective decisions, and durable/SQL
+Nexum v2.1.0 keeps encrypted local and SQL checkpoints (`OpenSQL*Store`) and
+signed operation IDs, and includes `ProtocolVersionV2` (reviewed evidence
+manifests and explicit `incomplete` closeouts), `GoalStore` /
+`CoordinationStore` / `AccordGate` conditional DAG nodes / portable
+`TaskHandoff` proofs, `Accord` / `AccordStore` evidence-gated collective
+decisions (including `BallotPrivacySealedPaillier` CDS94 ballots, where
+individual ballots stay hidden from public observers while `TallyAuthority`
+holds aggregate decryption capability), and `AccordAuthority` plus durable/SQL
 fence coordinators in `adapter`. A lost protocol response is
 recovered by resending those stored signed bytes. Do not Prepare again, and do
 not replay speech. Comlink carries those bytes on an `agree` packet and recovers
@@ -71,6 +75,7 @@ https://github.com/WillBeebe/nexum/blob/main/docs/DURABLE_AGREEMENTS.md
 
 From a Nexum checkout, run `go run ./examples/durable-retry`,
 `go run ./examples/return-handoff`, `go run ./examples/reconcile-handoff`,
-`go run ./examples/coordination`, and `go run ./examples/accord`.
+`go run ./examples/coordination`, `go run ./examples/accord`, and
+`go run ./examples/policy-graph`.
 These are local demonstrations, not a hosted service or an external payment
 guarantee.

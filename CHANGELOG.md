@@ -1,5 +1,65 @@
 # Changelog
 
+## v2.1.0
+
+### Sealed-ballot Paillier Accords (`internal/he`, `nex`)
+
+- **`BallotPrivacySealedPaillier`:** Adds encrypted collective ballots via
+  `SealedTallyConfig`, `SealedTallyKey` (`NewSealedTallyKey`, `PublicKey`,
+  `TallyAccord`), `EncryptSealedBallot`, `EncryptSealedBallotWithVetoes`,
+  `EncryptSealedBallotWithOpenings`, and `SealedTallyProof`. Individual ballot
+  choices remain hidden Paillier ciphertexts during voting and after resolution
+  (no plaintext `Votes`, `WinningOptionDissents`, or voter lists in tallies),
+  enforced with 8-round parallel CDS94 `{0,1}` OR-proofs (`he.ProveBit` /
+  `he.VerifyBit`, `< 2^-128` soundness against small-factor moduli `> 65537`),
+  `ExclusiveProof`, optional `SingleChoiceProof`, veto `DissentRandomness`
+  openings against vote-plus-veto equivocation, and GMR-backed `he.VerifyEqual`
+  aggregate proofs (`he.DecryptAndProve`). Trust boundary: hides individual
+  ballots from public observers via additive Paillier, while the
+  `TallyAuthority` key holder retains decryption capability (not general FHE or
+  threshold DKG).
+
+### Conditional DAG policy gates (`nex`)
+
+- **`AccordGate` and `TaskGateDependency`:** Adds native policy-gate nodes in
+  `PlanRevision.Gates` (`(*GoalStore).Gate`) and explicit terminal outcome
+  dependencies in `TaskSpec.GateDependencies` (`decided`, `deadlocked`,
+  `expired`, optional `AllowedOptions`, `ExpectedCommitment`, and
+  `ExpectedDeadlockReason`). Preserves backward-compatible `TaskSpec.ID()`,
+  `SignedPlanRevision.Head()`, and gate-free `goalRecord` JSON via
+  `omitempty`.
+- **`GateResolution` and enforcement:** Adds `(*CoordinationStore).RecordAccord`
+  and `(*CoordinationStore).GateStatus` backed by offline `VerifyAccordBundle`
+  verification and domain-separated `gateRecordKey` authenticated checkpoints
+  (with idempotent retries and `ErrOperationConflict` on conflicting terminal
+  heads). Extends `TaskDiscovery` with `GatesReady` and `GatesMismatch` in
+  `DiscoverGoal` and enforces gate satisfaction on `CoordinationStore.Claim`.
+
+### Encrypted SQL checkpoint stores & durable Accord outbox (`nex`, `adapter`)
+
+- **Stateless SQL checkpoint stores (`nex`):** Adds `OpenSQLStore`,
+  `OpenSQLProtocolStore`, `OpenSQLGoalStore`, `OpenSQLCoordinationStore`, and
+  `OpenSQLAccordStore` over stdlib `database/sql` for `SQLDialectPostgres`
+  (`pg_advisory_xact_lock`) and `SQLDialectSQLite` (immediate transaction lock
+  via `nex_checkpoint_locks`), encrypting rows client-side with AES-256-GCM
+  and `(namespace, id)`-bound AAD alongside authenticated warm-cache checks
+  for stateless pod failover without local directory copies.
+- **Outbox `AccordAuthority` (`adapter`):** Adds `KindAccord`,
+  `EncodeAccord`, and `AccordAuthority` (`Apply`, `View`) for `adapter.Outbox`
+  submission, lost-response reconciliation, and signed response verification
+  against `nex.AccordStore`.
+
+### Integrated demo, fuzzing, adversarial tests, and CI
+
+- **New runnable example:** Added `examples/policy-graph`
+  (`go run ./examples/policy-graph`) exercising shared SQL checkpoint failover,
+  ProtocolV2 `TaskHandoff` attestations, `adapter.Outbox` + `AccordAuthority`,
+  `BallotPrivacySealedPaillier`, and `AccordGate` conditional branch unlocking.
+- **Security & CI:** Added `nex/v210_adversarial_test.go`, 7 native Go fuzz
+  targets (`nex`, `internal/nexum`, `adapter`), and `.github/workflows/ci.yml`
+  verifying formatting, `go vet`, `-race` tests, fuzz smoke, demos, docs site
+  build, and `SOURCE_MANIFEST.json`.
+
 ## v2.0.2
 
 ### Evidence-gated collective decisions (`nex.Accord`)

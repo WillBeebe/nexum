@@ -1,7 +1,11 @@
 [
   {
+    "path": ".github/workflows/ci.yml",
+    "sha256": "c8bf29b4458bff8f0c01c6712f60de8b0cb566479f26920c603adea2d86d4b75"
+  },
+  {
     "path": "CHANGELOG.md",
-    "sha256": "85438ef09c273b5416da04803767c86b1a94494b6eaa249b3d46822436115678"
+    "sha256": "55fa655278ac841e2a1c701fd05809b14b6fda0980c0c7c5ff097eb50708711d"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -21,15 +25,19 @@
   },
   {
     "path": "README.md",
-    "sha256": "34c762c48845390f23c4379f5e4e7c3bb131a6fcd2a723e380046637ea29de02"
+    "sha256": "dca8fbdd5f9fe966541e84336dafa76533fdb4270b05771ba603e11cad854baf"
   },
   {
     "path": "THIRD_PARTY.md",
     "sha256": "90101cd102524ba13ca18e418b65b80beb17ae4f8b2806bb0989f0987a2942ef"
   },
   {
+    "path": "adapter/accord_authority_test.go",
+    "sha256": "71892a71b30612ef4c1033908b03269d4799bbfdbd53d83d2c2dd5d23cb684b4"
+  },
+  {
     "path": "adapter/authority.go",
-    "sha256": "e54a9e40e140588ffe6192c409dd3f27d77cdeff12a838d4eaeab44b70402cb2"
+    "sha256": "b8d5ce6beac6c184df83075bd83c19156cd6c92e281f23a33b586f811b3ffe22"
   },
   {
     "path": "adapter/coordinator_durable.go",
@@ -65,7 +73,7 @@
   },
   {
     "path": "adapter/encode.go",
-    "sha256": "7a03b41b40c3efc8e56c600bde58d2b2902df89f2c1e1a880306a58aac2d2d17"
+    "sha256": "eb7f4a2f40f9d128937da321490ab8140f7d1c7f9db51c81068f3271f4ea8e11"
   },
   {
     "path": "adapter/fence.go",
@@ -74,6 +82,10 @@
   {
     "path": "adapter/fence_test.go",
     "sha256": "d734e07333c75f127048a63d273f28d20485f62a7817e967bd3e39410b54cc29"
+  },
+  {
+    "path": "adapter/fuzz_test.go",
+    "sha256": "2d0cb2b036621f8c473213e129bd8a9d0d4eb0e0ebe3b0b8b3eb4e0e31f571d5"
   },
   {
     "path": "adapter/helper_test.go",
@@ -89,7 +101,7 @@
   },
   {
     "path": "adapter/outbox.go",
-    "sha256": "be5b01b75b7a4cf282089419905067f417ef0d52e2c969e301aaa5c4e9a2c563"
+    "sha256": "d5ca077a63461a695a341dfd50fc03ded86ecd8b399c431f486f7df737283e31"
   },
   {
     "path": "adapter/outbox_terminal_test.go",
@@ -109,7 +121,7 @@
   },
   {
     "path": "adapter/types.go",
-    "sha256": "82bd4a366f47f0658529d0e67f75a9697582817833c93f5d842e01ed81b25851"
+    "sha256": "64e69db6b7d41fddc7fe89289261316edafd043136ed64f821ce27b19660653b"
   },
   {
     "path": "adapter/vault.go",
@@ -121,19 +133,19 @@
   },
   {
     "path": "docs/DURABLE_AGREEMENTS.md",
-    "sha256": "323b4fddac534a8d670b99f60f4b85b1839a37dafffa7b235911d4e8f30648cf"
+    "sha256": "d661c1f22f2c28a91d4a156f48b22e4ee479a0c2a340a0e7317835a33d0e6f17"
   },
   {
     "path": "docs/INSTALL.md",
-    "sha256": "fe3eb1c349acbd7547ab008087012b306c8ce1b5351f389d0a53b4a59000a011"
+    "sha256": "faa9052ad4e74eacd058c2e05ed40f98aa3c17828c8b25ca3be2cb4321a15a24"
   },
   {
     "path": "docs/TECHNICAL_DESIGN.md",
-    "sha256": "ca694ce7ac5f3dca6fff23467b21d57d1c0f214468f1c6d27313943169e4fa47"
+    "sha256": "c3401aaed30d4e8b6279cd897b4e63f8dd0afdc3ee1a49dec23045c762605f2a"
   },
   {
     "path": "examples/README.md",
-    "sha256": "29132aefc7af56f9b34fb2994f86d842816ae0c5389fc53dd44e3192eb40b87d"
+    "sha256": "331c164194d54f595bea51f17d899a65728fcddcf2c9bf2134af9a6b72aa4b7a"
   },
   {
     "path": "examples/accord/README.md",
@@ -204,6 +216,18 @@
     "sha256": "0d53e69bc4bccec9ac384dfed63b2b0e78d09b8f3bd635a27cec075de2b13dec"
   },
   {
+    "path": "examples/policy-graph/README.md",
+    "sha256": "531a93c08b76d3247ba249850019cdba61cbf766cd384ad3d2547ef5680ae8f4"
+  },
+  {
+    "path": "examples/policy-graph/main.go",
+    "sha256": "877f6ec8ffbe141887bd98c7fae2fc71f4e4918c49882f8b4b7a0a10b843c1af"
+  },
+  {
+    "path": "examples/policy-graph/main_test.go",
+    "sha256": "8bad409879dd28fce2890e3128f912f7ba1c0ef2dcf83b1451dba65090bb0fa1"
+  },
+  {
     "path": "examples/reconcile-handoff/main.go",
     "sha256": "d8d599e4284b9d9768e77fe15aebe1c47f517413f79029e11aae4b2f341a4536"
   },
@@ -242,6 +266,14 @@
   {
     "path": "internal/he/he_test.go",
     "sha256": "db47fdf558e090e3c231c58ab5a1f5caf002b5669eb4341268577183d959ee4c"
+  },
+  {
+    "path": "internal/he/orproof.go",
+    "sha256": "b12a30ea7141f87b22c5924c2394ca01845674ece3e6db30e2ac05eb7fb780fa"
+  },
+  {
+    "path": "internal/he/orproof_test.go",
+    "sha256": "f917fe73743bdda04117d34e921cc84473847b3f65b653f151b19f9e0c0cf765"
   },
   {
     "path": "internal/he/paillier.go",
@@ -336,6 +368,10 @@
     "sha256": "80ccee54a270969c1333efc949d02f3d94541234038b31eee53e31d214d19a96"
   },
   {
+    "path": "internal/nexum/fuzz_test.go",
+    "sha256": "5e81540febbc67c258334ebaa0c4aa03df5180a7c9ed09e22f51607a5ba7879f"
+  },
+  {
     "path": "internal/nexum/nexum_v202_regression_test.go",
     "sha256": "0d4b77b6fb7f3947821ae72c8e34a9393569b9708f63b753290507b166f3b4f0"
   },
@@ -421,7 +457,7 @@
   },
   {
     "path": "nex/accord.go",
-    "sha256": "e382d4f1963896420f5e3b809a591be1d134dd1b9a8bfbfc1be9aa3bbf807b9d"
+    "sha256": "b3e40ec6baadf4aa3e26b5e10412a8079c23a450ebbaeb2e695480f0761ab598"
   },
   {
     "path": "nex/accord_adversarial_test.go",
@@ -433,11 +469,19 @@
   },
   {
     "path": "nex/accord_rules.go",
-    "sha256": "388381e1dc29b12875dc2cdc336f6aa5275d340486ab56ab9335482b10277f7e"
+    "sha256": "9c972e08b2e465caa97dd4d026cb453d19b46b1ce0d7b1e5ee2e2e0f5c10c5eb"
+  },
+  {
+    "path": "nex/accord_sealed.go",
+    "sha256": "adc0afe9411b964522036780975ff7880683a56f8afa2163b095aa1d8cf99c76"
+  },
+  {
+    "path": "nex/accord_sealed_test.go",
+    "sha256": "d1a88baa310834e91207039b1c30f01ea209c5f332f2020e6d27ada4422fae2a"
   },
   {
     "path": "nex/accord_store.go",
-    "sha256": "f8a39f979fa59bfdb00ae9e5bd3d9a93092aa82379482fad6dfecf94a93e390c"
+    "sha256": "817c6fde233ca08cd382299f7e7f776c6e7182c04cff887fd83ffa38ae4197ed"
   },
   {
     "path": "nex/accord_test.go",
@@ -461,15 +505,23 @@
   },
   {
     "path": "nex/coordination.go",
-    "sha256": "138b466a67544b78b568acd98c0ea590b4363b0a1f6a57ddb886d1e3fba567e4"
+    "sha256": "e24fb6f810ce0834fd2ed96e88eef68c98f1edce6bc6e3b36cf058e2aa978845"
   },
   {
     "path": "nex/coordination_checkpoint_test.go",
     "sha256": "5fa240cb91dfd866b650d26cd9702c6971fe272599f31e0e7350b61dc796fa2c"
   },
   {
+    "path": "nex/coordination_gate.go",
+    "sha256": "e746776ff6b04bdaad8429433965e7e3e38c35a5690e9a5dbaf983e006ce79b9"
+  },
+  {
+    "path": "nex/coordination_gate_test.go",
+    "sha256": "42df5eb92f167f98909e2d6486c5d06575e74d4ebf5a5cde1852d330ac5d7ebb"
+  },
+  {
     "path": "nex/coordination_plan.go",
-    "sha256": "a74da2e016c167ed5693679b355b0fc37e7d66312896739ecf3a5c4c8889b4e4"
+    "sha256": "d94e434e7276cd5296af37d645205a2453c0844dc6297f77da8f55ecace31b0f"
   },
   {
     "path": "nex/coordination_plan_test.go",
@@ -486,6 +538,10 @@
   {
     "path": "nex/doc.go",
     "sha256": "4fc84a59be57351c01beab552cd5746e2e93b8b3b94c3566d6f90bd31efac9ea"
+  },
+  {
+    "path": "nex/fuzz_test.go",
+    "sha256": "f0b59d2e07e47b2fb4a26ddbc1ced42f4d2ed9434c789a4f59e36e804ac6b3f6"
   },
   {
     "path": "nex/handoff.go",
@@ -509,7 +565,7 @@
   },
   {
     "path": "nex/protocol_store.go",
-    "sha256": "d90ec4d1b0ffeee5e04990172466d8932293719daa47ca129e2812df003e4d04"
+    "sha256": "5819992bbcc014cf26b47e88f1688f99a8fe623962a80f58fc3fa7f5423442c2"
   },
   {
     "path": "nex/protocol_test.go",
@@ -528,8 +584,16 @@
     "sha256": "f33fda0e8361b5d643f3e3fdda42ed3080302683bc05e293d541069644327792"
   },
   {
+    "path": "nex/sql_store.go",
+    "sha256": "428740b5cfeda4c371a36136ca0faf47b439fba77997cc539a87e03d60901d2a"
+  },
+  {
+    "path": "nex/sql_store_test.go",
+    "sha256": "1a0d16d7a4128cc6b8860f86043d4f7450f484799ef87ce9ee5007168d5a1cef"
+  },
+  {
     "path": "nex/store.go",
-    "sha256": "ee3880cabc6bbc2a30df585d8b82ed0b4e64bb6810a89df7e7489bd93a1f193f"
+    "sha256": "b265c47717220185251ba566fcac877f12ddc25535045152eb3a0cd8f864230e"
   },
   {
     "path": "nex/store_lock_other.go",
@@ -542,6 +606,10 @@
   {
     "path": "nex/store_test.go",
     "sha256": "42f6b615c51b7bc763c7e73d65c2f500383c241541830a2dfeb5db4bdb44fc02"
+  },
+  {
+    "path": "nex/v210_adversarial_test.go",
+    "sha256": "0b785df4399739b6b3a7a74e531c1e63a0ef8a28a22dfeb2a6f7572b84667da4"
   },
   {
     "path": "quarry/keccak/LICENSE",
@@ -585,7 +653,7 @@
   },
   {
     "path": "site/agents.md",
-    "sha256": "17ae8d95f803ac857eb7f0cacecbf640f9805904ee6ece999310566c5de499a4"
+    "sha256": "e1fa7543c2b387ebbeb23a10427ac6437aecd1d05dae07ff7cf0969344706e74"
   },
   {
     "path": "site/build.py",
@@ -601,7 +669,7 @@
   },
   {
     "path": "site/index.html",
-    "sha256": "6a6dc88d5c24704183c2094966d0a0aca90dba48cc8df5b44b34b0db6f466ebb"
+    "sha256": "e5021fa5c23467fb082d911e972ded0796588993bda7bef5536c5f1e2e674c48"
   },
   {
     "path": "site/site.js",

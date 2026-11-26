@@ -287,6 +287,11 @@ downstream authorizers (`AuthorizeProtocolFromAccord`,
 `AuthorizeDispositionFromAccord`) verify exported bundles offline without
 private keys or source stores.
 
+#### Sealed-ballot Paillier Accords and `AccordGate` conditional DAGs
+
+- **Sealed ballots (`BallotPrivacySealedPaillier`):** Participants encrypt per-option `{0,1}` approve and dissent ciphertexts (`EncryptSealedBallot`, `EncryptSealedBallotWithVetoes`, `EncryptSealedBallotWithOpenings`) accompanied by 8-round parallel CDS94 OR-proofs (`he.ProveBit` / `he.VerifyBit`, `< 2^-128` soundness against small-factor moduli `> 65537`), mutual-exclusion proofs (`ExclusiveProof`), optional `SingleChoiceProof`, and `DissentRandomness` openings when a voter publicly vetoes an option. During voting and after resolution, `AccordView` and `AccordOutcome` omit plaintext `Votes`, `WinningOptionDissents`, and per-option voter lists. At resolution, the `TallyAuthority` invokes `SealedTallyKey.TallyAccord` to decrypt only kernel-computed homomorphic option and mandatory-role aggregates and attaches GMR-backed `he.VerifyEqual` proofs verified offline by `VerifyAccordBundle`. **Trust boundary:** additive Paillier hides individual ballots during voting and after resolution from public observers and other voters, while the `TallyAuthority` private-key holder can decrypt ciphertexts and must be protected; this is not general FHE or threshold distributed key generation (DKG).
+- **Conditional DAG policy gates (`AccordGate`, `TaskGateDependency`):** `PlanRevision.Gates` registers immutable `AccordGate` nodes pinned to an `AccordSpec.ID()` and optional `AllowedOptions`, while `TaskSpec.GateDependencies` binds downstream tasks to explicit terminal Accord phases (`decided` with `OptionID` and optional `ExpectedCommitment`, `deadlocked` with optional `ExpectedDeadlockReason`, or `expired`). `CoordinationStore.RecordAccord` verifies an exported `AccordBundle` offline via `VerifyAccordBundle`, enforces `AllowedOptions`, persists an authenticated `GateResolution` under domain-separated `gateRecordKey(goalID, gateID)` (idempotent on exact head retry, `ErrOperationConflict` on conflicting terminal heads), and gates both `DiscoverGoal` (`GatesReady`, `GatesMismatch`) and `CoordinationStore.Claim` (`ErrTaskDependency`). Gate-free `TaskSpec.ID()`, `SignedPlanRevision.Head()`, and `goalRecord` JSON remain unchanged via `omitempty`.
+
 ### Council: requirements, unanimous consent, execution
 
 A council contains 3–7 distinct parties, requirements assigned to holders and
@@ -501,8 +506,19 @@ agreements. Give work execution separate process/container isolation and only
 the specific resource capabilities that its authorization permits.
 
 A Kubernetes Deployment, additional replicas or a database mounted beside the
-process does not add a distributed ownership protocol. Store is a local
-filesystem library, not a production server or multi-host database adapter.
+process does not add a distributed ownership protocol. Store is a local filesystem library, not a production server or multi-host
+database adapter. For multi-pod stateless failover across application hosts,
+`OpenSQLStore`, `OpenSQLProtocolStore`, `OpenSQLGoalStore`,
+`OpenSQLCoordinationStore`, and `OpenSQLAccordStore` persist the same
+client-side AES-256-GCM encrypted checkpoints in a shared PostgreSQL or SQLite
+database over stdlib `database/sql` (`SQLDialectPostgres` with
+`pg_advisory_xact_lock`, `SQLDialectSQLite` with serialized transaction locks on
+`nex_checkpoint_locks`), binding AEAD AAD to `(namespace, id)` and validating
+cached checkpoints against the current authenticated SQL payload/version on
+every hit. In `adapter`, `Outbox` pairs with `StoreAuthority` (`KindAgreement`),
+`ProtocolAuthority` (`KindProtocol`), and `AccordAuthority` (`KindAccord`,
+`EncodeAccord`) for durable retry, lost-response reconciliation, and signed
+receipt verification across restarts and stateless pod failovers (`examples/policy-graph`).
 The remainder of this section separates local durability from the stronger
 service contract still needed for external effects and failover.
 

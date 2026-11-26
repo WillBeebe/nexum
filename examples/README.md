@@ -1,4 +1,4 @@
-# Collaboration examples — Nexum v2.0.2
+# Collaboration examples — Nexum v2.1.0
 
 Run from the repository root with Go 1.25 or newer:
 
@@ -12,6 +12,7 @@ go run ./examples/return-handoff
 go run ./examples/reconcile-handoff
 go run ./examples/coordination
 go run ./examples/accord
+go run ./examples/policy-graph
 go test -race ./examples/...
 ```
 
@@ -36,6 +37,11 @@ stopped-writer handoff. `go run ./examples/coordination` executes a multi-task
 DAG and verifies portable `TaskHandoff` proofs. `go run ./examples/accord`
 layers an evidence-gated `nex.Accord` / `AccordStore` release decision over
 upstream handoffs, verifying weighted voting, bounded veto, preserved dissent,
-and offline `VerifyAccordBundle` replay. Read
+and offline `VerifyAccordBundle` replay. `go run ./examples/policy-graph`
+combines all five v2.1.0 capabilities across two stateless pods sharing
+encrypted SQL checkpoint stores (`OpenSQL*Store`), submitting 8-round CDS94
+`BallotPrivacySealedPaillier` ballots through `adapter.Outbox` +
+`AccordAuthority`, resolving via `SealedTallyKey.TallyAccord`, and unlocking a
+conditional `AccordGate` DAG branch exclusively. Read
 [durable agreements](../docs/DURABLE_AGREEMENTS.md) for application key
 management and outbox requirements.

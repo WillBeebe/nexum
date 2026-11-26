@@ -158,8 +158,28 @@ bounded authenticated cache, and exact signed retry semantics for `nex.Accord`
 collective decisions. Re-applying an already-committed signed `AccordCommand`
 returns the original receipt hash across restarts without mutating state, while
 reusing a request ID with different content fails with `ErrOperationConflict`.
-Run `go run ./examples/accord` for a local end-to-end demonstration over real
-upstream coordination handoffs.
+In `adapter`, `AccordAuthority` (`KindAccord`, `EncodeAccord`) connects
+`Outbox` retry/reconciliation and signed `AuthenticatedResponse` verification
+to `AccordStore` using a required host-supplied monotone `Height` callback.
+
+For conditional policy graphs, `CoordinationStore.RecordAccord` verifies an
+exported `AccordBundle` offline against the `GoalStore`'s pinned `AccordGate`
+(`GoalStore.Gate`), persists the terminal `GateResolution` under the
+domain-separated key `gateRecordKey(goalID, gateID)` (preserving idempotency on
+identical `(AccordID, Head)` retries and refusing conflicting terminal heads with
+`ErrOperationConflict`), and enforces gate dependencies in `DiscoverGoal` and
+`Claim` (`GateStatus`).
+
+For stateless multi-pod failover without local filesystem state or directory
+copies, `OpenSQLStore`, `OpenSQLProtocolStore`, `OpenSQLGoalStore`,
+`OpenSQLCoordinationStore`, and `OpenSQLAccordStore` back all five stores with
+a shared stdlib `*sql.DB` (`SQLDialectPostgres` advisory locks or
+`SQLDialectSQLite` serialized lock rows), distinct per-store namespaces,
+`(namespace, id)`-bound AES-256-GCM AAD, and per-read authenticated cache
+validation against the current stored checkpoint version and plaintext digest.
+Run `go run ./examples/accord` for a local end-to-end Accord demonstration, or
+`go run ./examples/policy-graph` for stateless SQL failover, `AccordAuthority`,
+`BallotPrivacySealedPaillier` CDS94 voting, and `AccordGate` branch unlocking.
 
 ## What remains outside this guarantee
 
