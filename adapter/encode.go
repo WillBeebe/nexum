@@ -13,6 +13,7 @@ type SignedPayload struct {
 	Kind      Kind                 `json:"kind"`
 	Operation *nex.Operation       `json:"operation,omitempty"`
 	Command   *nex.ProtocolCommand `json:"command,omitempty"`
+	Accord    *nex.AccordCommand   `json:"accord,omitempty"`
 	Signature []byte               `json:"signature"`
 	ApplyAt   time.Time            `json:"apply_at,omitempty"`
 	Height    uint64               `json:"height,omitempty"`
@@ -26,21 +27,39 @@ func EncodeProtocol(cmd nex.ProtocolCommand, signature []byte) ([]byte, error) {
 	return json.Marshal(SignedPayload{Version: Version, Kind: KindProtocol, Command: &cmd, Signature: append([]byte(nil), signature...), Height: cmd.Height})
 }
 
+func EncodeAccord(cmd nex.AccordCommand, signature []byte) ([]byte, error) {
+	return json.Marshal(SignedPayload{Version: Version, Kind: KindAccord, Accord: &cmd, Signature: append([]byte(nil), signature...), Height: cmd.Height})
+}
+
 func DecodePayload(raw []byte) (SignedPayload, error) {
 	var p SignedPayload
 	if json.Unmarshal(raw, &p) != nil || p.Version != Version {
 		return SignedPayload{}, ErrItem
 	}
-	if (p.Operation != nil) == (p.Command != nil) {
+	populated := 0
+	if p.Operation != nil {
+		populated++
+	}
+	if p.Command != nil {
+		populated++
+	}
+	if p.Accord != nil {
+		populated++
+	}
+	if populated != 1 || len(p.Signature) == 0 {
 		return SignedPayload{}, ErrItem
 	}
 	switch p.Kind {
 	case KindAgreement:
-		if p.Operation == nil || p.Command != nil || len(p.Signature) == 0 || p.Operation.ID == "" {
+		if p.Operation == nil || p.Operation.ID == "" {
 			return SignedPayload{}, ErrItem
 		}
 	case KindProtocol:
-		if p.Command == nil || p.Operation != nil || len(p.Signature) == 0 || p.Command.RequestID == "" || p.Command.ProtocolID == "" {
+		if p.Command == nil || p.Command.RequestID == "" || p.Command.ProtocolID == "" {
+			return SignedPayload{}, ErrItem
+		}
+	case KindAccord:
+		if p.Accord == nil || p.Accord.RequestID == "" || p.Accord.AccordID == "" {
 			return SignedPayload{}, ErrItem
 		}
 	default:

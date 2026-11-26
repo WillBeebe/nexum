@@ -557,8 +557,26 @@ func (o *Outbox) enforceHistory(tenant string) error {
 	return nil
 }
 
+func validKind(kind Kind) bool {
+	switch kind {
+	case KindAgreement, KindProtocol, KindAccord:
+		return true
+	default:
+		return false
+	}
+}
+
+func maxSignedObjectBytes(kind Kind) int {
+	if kind == KindAccord {
+		// nex.Accord permits 512 KiB commands for attest (and sealed votes);
+		// allow envelope overhead on top of the inner command cap.
+		return 512<<10 + 4096
+	}
+	return 64 << 10
+}
+
 func validateItem(item OutboundItem) error {
-	if item.Version != Version || (item.Kind != KindAgreement && item.Kind != KindProtocol) {
+	if item.Version != Version || !validKind(item.Kind) {
 		return ErrItem
 	}
 	if err := validateID(item.Tenant); err != nil {
@@ -573,7 +591,7 @@ func validateItem(item OutboundItem) error {
 	if err := validateID(item.Destination); err != nil {
 		return err
 	}
-	if len(item.SignedObject) == 0 || len(item.SignedObject) > 64<<10 {
+	if len(item.SignedObject) == 0 || len(item.SignedObject) > maxSignedObjectBytes(item.Kind) {
 		return ErrItem
 	}
 	payload, err := DecodePayload(item.SignedObject)
@@ -592,6 +610,12 @@ func validateItem(item OutboundItem) error {
 		if payload.Command == nil || payload.Command.RequestID != item.OperationID || payload.Command.ProtocolID != item.AgreementID {
 			return ErrItem
 		}
+	case KindAccord:
+		if payload.Accord == nil || payload.Accord.RequestID != item.OperationID || payload.Accord.AccordID != item.AgreementID || payload.Accord.Height == 0 {
+			return ErrItem
+		}
+	default:
+		return ErrItem
 	}
 	return nil
 }
@@ -650,7 +674,7 @@ func responseMatchesKind(kind Kind, resp AuthenticatedResponse) bool {
 	switch kind {
 	case KindAgreement:
 		return resp.Result != nil && resp.Result.Head != "" && resp.Result.Head == resp.ReceiptHead
-	case KindProtocol:
+	case KindProtocol, KindAccord:
 		return resp.Result == nil && resp.ReceiptHead != ""
 	default:
 		return false
