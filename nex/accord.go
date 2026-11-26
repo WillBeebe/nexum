@@ -1566,6 +1566,9 @@ func validTaskSpecStrings(t TaskSpec) bool {
 			return false
 		}
 	}
+	if !validTaskGateDependenciesStrings(t.GateDependencies) {
+		return false
+	}
 	return true
 }
 
@@ -1784,6 +1787,7 @@ func cloneTaskSpec(t TaskSpec) TaskSpec {
 	out.Outputs = slices.Clone(t.Outputs)
 	out.FailureOutputs = slices.Clone(t.FailureOutputs)
 	out.Dependencies = slices.Clone(t.Dependencies)
+	out.GateDependencies = slices.Clone(t.GateDependencies)
 	return out
 }
 
