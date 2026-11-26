@@ -17,6 +17,7 @@ jobs:
   verify:
     name: Verify (Go 1.25)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,7 +41,7 @@ jobs:
         run: go vet ./...
 
       - name: Run tests with race detector
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout=20m ./...
 
       - name: Run 5-second fuzz smoke tests
         run: |

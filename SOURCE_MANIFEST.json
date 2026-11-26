@@ -1,7 +1,7 @@
 [
   {
     "path": ".github/workflows/ci.yml",
-    "sha256": "c8bf29b4458bff8f0c01c6712f60de8b0cb566479f26920c603adea2d86d4b75"
+    "sha256": "2079b45124933a23eb5aa57bec5cefcfbb4159786f284dad8c12e08906dc1f82"
   },
   {
     "path": "CHANGELOG.md",
@@ -477,7 +477,7 @@
   },
   {
     "path": "nex/accord_sealed_test.go",
-    "sha256": "d1a88baa310834e91207039b1c30f01ea209c5f332f2020e6d27ada4422fae2a"
+    "sha256": "d450336235c829d0180f670f6c75c11cf8d54770ae656fef9652a290503cdf64"
   },
   {
     "path": "nex/accord_store.go",
@@ -609,7 +609,7 @@
   },
   {
     "path": "nex/v210_adversarial_test.go",
-    "sha256": "0b785df4399739b6b3a7a74e531c1e63a0ef8a28a22dfeb2a6f7572b84667da4"
+    "sha256": "f4f19e9f24201704feeae22cd442a4b342a3837309c6f31e9cce7eb1d741d13c"
   },
   {
     "path": "quarry/keccak/LICENSE",

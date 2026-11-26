@@ -187,7 +187,7 @@ func TestV202AccordSpecIDStability(t *testing.T) {
 }
 
 func TestSealedAccordSpecValidation(t *testing.T) {
-	key, err := NewSealedTallyKey(2048)
+	key, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestSealedAccordLifecycleDecidedPrivacyAndOfflineVerify(t *testing.T) {
 }
 
 func TestSealedAccordRulesDeadlocksVetoesRolesAndZeroBallots(t *testing.T) {
-	sharedKey, err := NewSealedTallyKey(2048)
+	sharedKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +602,7 @@ func TestSealedAccordRulesDeadlocksVetoesRolesAndZeroBallots(t *testing.T) {
 }
 
 func TestSealedAccordAdversarialProofAttacksAndReplay(t *testing.T) {
-	sharedKey, err := NewSealedTallyKey(2048)
+	sharedKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}

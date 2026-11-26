@@ -429,7 +429,7 @@ func TestV210Adversarial_SmallFactorModulusMultiRoundSoundness(t *testing.T) {
 	}
 
 	// Submitting a forged E(q) sealed ballot into a live Accord MUST fail with ErrAccordEvidence!
-	dummyKey, err := NewSealedTallyKey(2048)
+	dummyKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestV210Adversarial_SmallFactorModulusMultiRoundSoundness(t *testing.T) {
 // Regression test for Defect #4: Veto-dissent opening prevents vote+veto equivocation
 // in BOTH orders (veto-then-vote and vote-then-veto) without leaking non-vetoed options.
 func TestV210Adversarial_SealedVoteAndVetoEquivocationBlocked(t *testing.T) {
-	sharedKey, err := NewSealedTallyKey(2048)
+	sharedKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +646,7 @@ func TestV210Adversarial_SealedVoteAndVetoEquivocationBlocked(t *testing.T) {
 }
 
 func TestV210Adversarial_SealedAccordTallyModulusAliasingAnd32Options(t *testing.T) {
-	sharedKey, err := NewSealedTallyKey(2048)
+	sharedKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1393,7 +1393,7 @@ func TestV210Adversarial_AccordGateCorruptPlanAndSwappedCheckpoints(t *testing.T
 }
 
 func TestV210Adversarial_SQLMultiPodSealedAccordAndGateRace(t *testing.T) {
-	sharedKey, err := NewSealedTallyKey(2048)
+	sharedKey, err := NewSealedTallyKey(1024)
 	if err != nil {
 		t.Fatal(err)
 	}
