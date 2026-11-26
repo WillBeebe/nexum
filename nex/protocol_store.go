@@ -3,16 +3,14 @@ package nex
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"sync"
 )
 
 // ProtocolStore persists agreement/delegation histories through the existing
-// authenticated local storage and OS-lock implementation. Use a directory
-// separate from legacy Contract storage. No resource budget or currency is
-// required to enter, execute, or complete a Protocol.
+// authenticated storage and lock implementation (local OS-lock files or SQL).
+// Use a directory or SQL namespace separate from other stores. No resource
+// budget or currency is required to enter, execute, or complete a Protocol.
 const maxCachedProtocols = 256
 
 type ProtocolStore struct {
@@ -23,8 +21,8 @@ type ProtocolStore struct {
 }
 
 type cachedProtocol struct {
-	info        os.FileInfo
-	plainDigest [32]byte // SHA-256 of AES-256-GCM-authenticated storedProtocol JSON plaintext read under s.store.withLock(id)
+	meta        checkpointMeta
+	plainDigest [32]byte // SHA-256 of AES-256-GCM-authenticated storedProtocol JSON plaintext read under s.store.withLocked(id)
 	spec        ProtocolSpec
 	events      []ProtocolEvent
 	view        ProtocolView
@@ -57,16 +55,13 @@ func (s *ProtocolStore) Stats() StoreStats {
 	return s.store.Stats()
 }
 
-// loadLocked authenticates and loads protocol id; callers MUST hold s.store.withLock(id, ...) across the entire call.
-func (s *ProtocolStore) loadLocked(id string) (*Protocol, error) {
-	info, err := os.Lstat(s.store.path(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	plainJSON, err := s.store.readEncrypted(id)
+// loadLocked authenticates and loads protocol id; callers MUST hold s.store.withLocked(id, ...) across the entire call.
+func (s *ProtocolStore) loadLocked(tx checkpointTx, id string) (*Protocol, error) {
+	return s.loadLockedOpts(tx, id, true)
+}
+
+func (s *ProtocolStore) loadLockedOpts(tx checkpointTx, id string, updateCache bool) (*Protocol, error) {
+	plainJSON, meta, err := s.store.readEncryptedWithMeta(tx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +69,7 @@ func (s *ProtocolStore) loadLocked(id string) (*Protocol, error) {
 	s.mu.Lock()
 	entry, hit := s.cache[id]
 	s.mu.Unlock()
-	if hit && os.SameFile(entry.info, info) && entry.info.ModTime().Equal(info.ModTime()) && entry.info.Size() == info.Size() && entry.plainDigest == plainDigest {
+	if hit && entry.meta.same(meta) && entry.plainDigest == plainDigest {
 		s.store.cacheHits.Add(1)
 		return &Protocol{spec: cloneProtocol(entry.spec), events: cloneProtocol(entry.events), view: cloneProtocol(entry.view)}, nil
 	}
@@ -88,38 +83,82 @@ func (s *ProtocolStore) loadLocked(id string) (*Protocol, error) {
 	if err != nil {
 		return nil, ErrCorruptStore
 	}
-	s.mu.Lock()
-	if _, existed := s.cache[id]; !existed {
-		if len(s.cacheOrder) >= maxCachedProtocols*2 {
-			compacted := s.cacheOrder[:0]
-			seen := make(map[string]struct{}, len(s.cache))
-			for _, k := range s.cacheOrder {
-				if _, live := s.cache[k]; live {
-					if _, dup := seen[k]; !dup {
-						seen[k] = struct{}{}
-						compacted = append(compacted, k)
+	if updateCache {
+		s.mu.Lock()
+		if _, existed := s.cache[id]; !existed {
+			if len(s.cacheOrder) >= maxCachedProtocols*2 {
+				compacted := s.cacheOrder[:0]
+				seen := make(map[string]struct{}, len(s.cache))
+				for _, k := range s.cacheOrder {
+					if _, live := s.cache[k]; live {
+						if _, dup := seen[k]; !dup {
+							seen[k] = struct{}{}
+							compacted = append(compacted, k)
+						}
 					}
 				}
+				s.cacheOrder = compacted
 			}
-			s.cacheOrder = compacted
+			for len(s.cache) >= maxCachedProtocols && len(s.cacheOrder) > 0 {
+				evict := s.cacheOrder[0]
+				s.cacheOrder = s.cacheOrder[1:]
+				delete(s.cache, evict)
+			}
+			s.cacheOrder = append(s.cacheOrder, id)
 		}
-		for len(s.cache) >= maxCachedProtocols && len(s.cacheOrder) > 0 {
-			evict := s.cacheOrder[0]
-			s.cacheOrder = s.cacheOrder[1:]
-			delete(s.cache, evict)
-		}
-		s.cacheOrder = append(s.cacheOrder, id)
+		s.cache[id] = cachedProtocol{meta: meta, plainDigest: plainDigest, spec: cloneProtocol(p.spec), events: cloneProtocol(p.events), view: cloneProtocol(p.view)}
+		s.mu.Unlock()
 	}
-	s.cache[id] = cachedProtocol{info: info, plainDigest: plainDigest, spec: cloneProtocol(p.spec), events: cloneProtocol(p.events), view: cloneProtocol(p.view)}
-	s.mu.Unlock()
 	return p, nil
 }
 
-// invalidateCacheLocked drops the in-memory entry for id. Callers MUST hold s.store.withLock(id, ...).
+// invalidateCacheLocked drops the in-memory entry for id. Callers MUST hold s.store.withLocked(id, ...).
 func (s *ProtocolStore) invalidateCacheLocked(id string) {
 	s.mu.Lock()
 	delete(s.cache, id)
 	s.mu.Unlock()
+}
+
+func (s *ProtocolStore) createInTx(tx checkpointTx, p *Protocol) error {
+	v := p.View()
+	exists, err := tx.exists(v.ID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrExists
+	}
+	s.invalidateCacheLocked(v.ID)
+	return s.store.writeWith(tx, v.ID, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head})
+}
+
+func (s *ProtocolStore) createWithParent(parentTx checkpointTx, spec ProtocolSpec) (string, error) {
+	if childTx, ok := childSQLiteTx(parentTx, s.store); ok {
+		p, err := NewProtocol(spec)
+		if err != nil {
+			return "", err
+		}
+		v := p.View()
+		if err := validateStoreID(v.ID); err != nil {
+			return "", err
+		}
+		return v.ID, s.createInTx(childTx, p)
+	}
+	return s.Create(spec)
+}
+
+func (s *ProtocolStore) viewWithParent(parentTx checkpointTx, id string) (ProtocolView, error) {
+	if childTx, ok := childSQLiteTx(parentTx, s.store); ok {
+		if err := validateStoreID(id); err != nil {
+			return ProtocolView{}, err
+		}
+		p, err := s.loadLockedOpts(childTx, id, false)
+		if err != nil {
+			return ProtocolView{}, err
+		}
+		return p.View(), nil
+	}
+	return s.View(id)
 }
 
 func (s *ProtocolStore) Create(spec ProtocolSpec) (string, error) {
@@ -128,21 +167,15 @@ func (s *ProtocolStore) Create(spec ProtocolSpec) (string, error) {
 		return "", err
 	}
 	v := p.View()
-	err = s.store.withLock(v.ID, func() error {
-		if _, err := os.Lstat(s.store.path(v.ID)); err == nil {
-			return ErrExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		s.invalidateCacheLocked(v.ID)
-		return s.store.write(v.ID, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head})
+	err = s.store.withLocked(v.ID, func(tx checkpointTx) error {
+		return s.createInTx(tx, p)
 	})
 	return v.ID, err
 }
 func (s *ProtocolStore) View(id string) (ProtocolView, error) {
 	var v ProtocolView
-	err := s.store.withLock(id, func() error {
-		p, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		p, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -173,8 +206,8 @@ func (s *ProtocolStore) ApplyV1(id string, c ProtocolCommand, signature []byte, 
 
 func (s *ProtocolStore) apply(id string, c ProtocolCommand, signature []byte, height uint64, v1Only bool) (string, error) {
 	var head string
-	err := s.store.withLock(id, func() error {
-		p, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		p, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -204,14 +237,14 @@ func (s *ProtocolStore) apply(id string, c ProtocolCommand, signature []byte, he
 			return nil
 		}
 		s.invalidateCacheLocked(id)
-		return s.store.write(id, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head})
+		return s.store.writeWith(tx, id, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head})
 	})
 	return head, err
 }
 func (s *ProtocolStore) Export(id string) (ProtocolBundle, error) {
 	var b ProtocolBundle
-	err := s.store.withLock(id, func() error {
-		p, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		p, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -226,8 +259,8 @@ func (s *ProtocolStore) Export(id string) (ProtocolBundle, error) {
 
 func (s *ProtocolStore) Transact(id string, height uint64, steps ...ProtocolStep) (ProtocolView, error) {
 	var out ProtocolView
-	err := s.store.withLock(id, func() error {
-		p, err := s.loadLocked(id)
+	err := s.store.withLocked(id, func(tx checkpointTx) error {
+		p, err := s.loadLocked(tx, id)
 		if err != nil {
 			return err
 		}
@@ -256,7 +289,7 @@ func (s *ProtocolStore) Transact(id string, height uint64, steps ...ProtocolStep
 			return nil
 		}
 		s.invalidateCacheLocked(id)
-		if err := s.store.write(id, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head}); err != nil {
+		if err := s.store.writeWith(tx, id, storedProtocol{protocolStoreVersion, p.Bundle(), v.Head}); err != nil {
 			return err
 		}
 		out = v

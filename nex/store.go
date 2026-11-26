@@ -89,14 +89,50 @@ type StoreStats struct {
 	DirSyncNanos        int64
 }
 
-// Store persists encrypted contract checkpoints on a local filesystem. Separate
-// handles and processes serialize each contract through an OS file lock. It is
-// not a distributed store; do not use network filesystems or delete lock files.
-// Keep the 32-byte storage key in the application's key store, outside this directory.
-// Losing it loses access. Restoring an old backup can roll back history.
+type checkpointMeta struct {
+	exists   bool
+	version  int64
+	fileInfo os.FileInfo
+}
+
+func (m checkpointMeta) same(other checkpointMeta) bool {
+	if !m.exists || !other.exists {
+		return false
+	}
+	if m.fileInfo != nil || other.fileInfo != nil {
+		if m.fileInfo == nil || other.fileInfo == nil {
+			return false
+		}
+		return os.SameFile(m.fileInfo, other.fileInfo) &&
+			m.fileInfo.ModTime().Equal(other.fileInfo.ModTime()) &&
+			m.fileInfo.Size() == other.fileInfo.Size()
+	}
+	return m.version > 0 && m.version == other.version
+}
+
+type checkpointTx interface {
+	exists(id string) (bool, error)
+	stat(id string) (checkpointMeta, error)
+	readRaw(id string) ([]byte, checkpointMeta, error)
+	writeRaw(id string, data []byte) error
+}
+
+type checkpointBackend interface {
+	aad(id string) []byte
+	withLock(id string, fn func(checkpointTx) error) error
+	directTx() checkpointTx
+	syncDir() error
+}
+
+// Store persists encrypted contract checkpoints on a local filesystem or an
+// encrypted SQL backend opened via OpenSQLStore. Local handles serialize each
+// contract through an OS file lock; SQL handles serialize through database
+// transactions and locks. Keep the 32-byte storage key in the application's
+// key store, outside storage. Losing it loses access.
 type Store struct {
-	dir  string
-	aead cipher.AEAD
+	dir     string
+	aead    cipher.AEAD
+	backend checkpointBackend
 	// Tests inject crashes/failures at actual persistence boundaries.
 	commitHook func(string) error
 
@@ -167,6 +203,7 @@ func OpenStore(dir string, key []byte) (*Store, error) {
 		return nil, err
 	}
 	st := &Store{dir: absolute, aead: aead}
+	st.backend = &localCheckpointBackend{store: st}
 	st.dirSyncOps.Add(1)
 	st.dirSyncNanos.Add(initSyncNanos)
 	return st, nil
@@ -180,24 +217,26 @@ func (s *Store) Create(c *Contract) error {
 		len(c.agreement.Receipts) != 2 || c.agreement.Sealed == nil {
 		return errors.New("nex: Create requires a new, unused contract")
 	}
-	return s.withLock(c.ID(), func() error {
-		if _, err := os.Lstat(s.path(c.ID())); err == nil {
-			return ErrExists
-		} else if !errors.Is(err, os.ErrNotExist) {
+	return s.withLocked(c.ID(), func(tx checkpointTx) error {
+		exists, err := tx.exists(c.ID())
+		if err != nil {
 			return err
+		}
+		if exists {
+			return ErrExists
 		}
 		record := storedContract{Version: 1, Terms: c.definition, Buyer: c.buyer, Seller: c.seller, Checkpoint: c.agreement.PrivateCheckpoint(), Operations: map[string]committedOperation{}}
 		if _, err := record.restore(c.ID()); err != nil {
 			return err
 		}
-		return s.write(c.ID(), record)
+		return s.writeWith(tx, c.ID(), record)
 	})
 }
 
 func (s *Store) View(id string) (ContractState, error) {
 	var view ContractState
-	err := s.withLock(id, func() error {
-		record, c, err := s.read(id)
+	err := s.withLocked(id, func(tx checkpointTx) error {
+		record, c, err := s.readWith(tx, id)
 		if err != nil {
 			return err
 		}
@@ -236,8 +275,8 @@ func (s *Store) Apply(id string, op Operation, signature []byte, now time.Time) 
 	if len(op.Command.Evidence) > 64<<10 || len(op.Command.Action) > 32 || !utf8.ValidString(op.Command.Evidence) || !utf8.ValidString(op.Command.Action) {
 		return result, errors.New("nex: operation too large")
 	}
-	err := s.withLock(id, func() error {
-		record, c, err := s.read(id)
+	err := s.withLocked(id, func(tx checkpointTx) error {
+		record, c, err := s.readWith(tx, id)
 		if err != nil {
 			return err
 		}
@@ -265,7 +304,7 @@ func (s *Store) Apply(id string, op Operation, signature []byte, now time.Time) 
 		record.Agreed = c.agreed
 		record.Checkpoint = c.agreement.PrivateCheckpoint()
 		record.Operations[op.ID] = committedOperation{op, append([]byte(nil), signature...), result}
-		return s.write(id, record)
+		return s.writeWith(tx, id, record)
 	})
 	if err != nil {
 		return Result{}, err
@@ -280,60 +319,57 @@ func validateOperationID(id string) error {
 	return nil
 }
 
-func (s *Store) path(id string) string { return filepath.Join(s.dir, id+".nex") }
-
-func (s *Store) withLock(id string, fn func() error) error {
+func validateStoreID(id string) error {
 	decoded, err := hex.DecodeString(id)
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != id {
 		return errors.New("nex: invalid contract ID")
 	}
-	f, err := os.OpenFile(filepath.Join(s.dir, id+".lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close() // OS releases the lock on close and process death.
-	waitStart := time.Now()
-	if err = lockStoreFile(f); err != nil {
-		return err
-	}
-	s.lockWaitNanos.Add(time.Since(waitStart).Nanoseconds())
-	s.lockAcquisitions.Add(1)
-	return fn()
+	return nil
 }
 
-func (s *Store) readEncrypted(id string) ([]byte, error) {
-	f, err := os.Open(s.path(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotFound
+func (s *Store) path(id string) string { return filepath.Join(s.dir, id+".nex") }
+
+func (s *Store) withLocked(id string, fn func(checkpointTx) error) error {
+	if err := validateStoreID(id); err != nil {
+		return err
 	}
+	return s.backend.withLock(id, fn)
+}
+
+func (s *Store) withLock(id string, fn func() error) error {
+	return s.withLocked(id, func(checkpointTx) error { return fn() })
+}
+
+func (s *Store) readEncryptedWithMeta(tx checkpointTx, id string) ([]byte, checkpointMeta, error) {
+	data, meta, err := tx.readRaw(id)
 	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxCheckpoint+1))
-	if err != nil {
-		return nil, err
+		return nil, checkpointMeta{}, err
 	}
 	s.checkpointReads.Add(1)
 	n := s.aead.NonceSize()
 	if len(data) > maxCheckpoint || len(data) < len(storeHeader)+n+s.aead.Overhead() {
-		return nil, ErrCorruptStore
+		return nil, checkpointMeta{}, ErrCorruptStore
 	}
 	if string(data[:len(storeHeader)]) != storeHeader {
-		return nil, ErrStoreVersion
+		return nil, checkpointMeta{}, ErrStoreVersion
 	}
 	nonce := data[len(storeHeader) : len(storeHeader)+n]
 	s.authDecryptOps.Add(1)
-	plain, err := s.aead.Open(nil, nonce, data[len(storeHeader)+n:], []byte(storeHeader+"/"+id))
+	plain, err := s.aead.Open(nil, nonce, data[len(storeHeader)+n:], s.backend.aad(id))
 	if err != nil {
-		return nil, ErrCorruptStore
+		return nil, checkpointMeta{}, ErrCorruptStore
 	}
-	return plain, nil
+	return plain, meta, nil
 }
 
-func (s *Store) read(id string) (storedContract, *Contract, error) {
+func (s *Store) readEncrypted(id string) ([]byte, error) {
+	plain, _, err := s.readEncryptedWithMeta(s.backend.directTx(), id)
+	return plain, err
+}
+
+func (s *Store) readWith(tx checkpointTx, id string) (storedContract, *Contract, error) {
 	var record storedContract
-	plain, err := s.readEncrypted(id)
+	plain, _, err := s.readEncryptedWithMeta(tx, id)
 	if err != nil {
 		return record, nil, err
 	}
@@ -346,6 +382,10 @@ func (s *Store) read(id string) (storedContract, *Contract, error) {
 	}
 	c, err := record.restore(id)
 	return record, c, err
+}
+
+func (s *Store) read(id string) (storedContract, *Contract, error) {
+	return s.readWith(s.backend.directTx(), id)
 }
 
 func (r *storedContract) restore(id string) (*Contract, error) {
@@ -445,7 +485,7 @@ func (s *Store) hook(stage string) error {
 	return nil
 }
 
-func (s *Store) write(id string, record any) error {
+func (s *Store) writeWith(tx checkpointTx, id string, record any) error {
 	plain, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -455,10 +495,108 @@ func (s *Store) write(id string, record any) error {
 		return err
 	}
 	data := append([]byte(storeHeader), nonce...)
-	data = s.aead.Seal(data, nonce, plain, []byte(storeHeader+"/"+id))
+	data = s.aead.Seal(data, nonce, plain, s.backend.aad(id))
 	if len(data) > maxCheckpoint {
 		return errors.New("nex: checkpoint size limit exceeded")
 	}
+	return tx.writeRaw(id, data)
+}
+
+func (s *Store) write(id string, record any) error {
+	return s.writeWith(s.backend.directTx(), id, record)
+}
+
+func (s *Store) syncDir() error {
+	return s.backend.syncDir()
+}
+
+type localCheckpointBackend struct {
+	store *Store
+}
+
+func (b *localCheckpointBackend) aad(id string) []byte {
+	return []byte(storeHeader + "/" + id)
+}
+
+func (b *localCheckpointBackend) withLock(id string, fn func(checkpointTx) error) error {
+	s := b.store
+	f, err := os.OpenFile(filepath.Join(s.dir, id+".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close() // OS releases the lock on close and process death.
+	waitStart := time.Now()
+	if err = lockStoreFile(f); err != nil {
+		return err
+	}
+	s.lockWaitNanos.Add(time.Since(waitStart).Nanoseconds())
+	s.lockAcquisitions.Add(1)
+	return fn(localCheckpointTx{store: s})
+}
+
+func (b *localCheckpointBackend) directTx() checkpointTx {
+	return localCheckpointTx{store: b.store}
+}
+
+func (b *localCheckpointBackend) syncDir() error {
+	s := b.store
+	start := time.Now()
+	err := syncDirectory(s.dir)
+	s.dirSyncNanos.Add(time.Since(start).Nanoseconds())
+	s.dirSyncOps.Add(1)
+	return err
+}
+
+type localCheckpointTx struct {
+	store *Store
+}
+
+func (tx localCheckpointTx) exists(id string) (bool, error) {
+	if _, err := os.Lstat(tx.store.path(id)); err == nil {
+		return true, nil
+	} else if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else {
+		return false, err
+	}
+}
+
+func (tx localCheckpointTx) stat(id string) (checkpointMeta, error) {
+	info, err := os.Lstat(tx.store.path(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return checkpointMeta{}, nil
+	}
+	if err != nil {
+		return checkpointMeta{}, err
+	}
+	return checkpointMeta{exists: true, fileInfo: info}, nil
+}
+
+func (tx localCheckpointTx) readRaw(id string) ([]byte, checkpointMeta, error) {
+	info, err := os.Lstat(tx.store.path(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, checkpointMeta{}, ErrNotFound
+	}
+	if err != nil {
+		return nil, checkpointMeta{}, err
+	}
+	f, err := os.Open(tx.store.path(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, checkpointMeta{}, ErrNotFound
+	}
+	if err != nil {
+		return nil, checkpointMeta{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxCheckpoint+1))
+	if err != nil {
+		return nil, checkpointMeta{}, err
+	}
+	return data, checkpointMeta{exists: true, fileInfo: info}, nil
+}
+
+func (tx localCheckpointTx) writeRaw(id string, data []byte) error {
+	s := tx.store
 	f, err := os.CreateTemp(s.dir, ".pending-")
 	if err != nil {
 		return err
@@ -495,14 +633,6 @@ func (s *Store) write(id string, record any) error {
 		return fmt.Errorf("%w: %v", ErrCommitUncertain, err)
 	}
 	return nil
-}
-
-func (s *Store) syncDir() error {
-	start := time.Now()
-	err := syncDirectory(s.dir)
-	s.dirSyncNanos.Add(time.Since(start).Nanoseconds())
-	s.dirSyncOps.Add(1)
-	return err
 }
 
 func syncDirectory(path string) error {
