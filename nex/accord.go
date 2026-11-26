@@ -34,7 +34,7 @@ const (
 	maxAccordSpecBytes    = 256 << 10 // 256 KiB
 	maxAccordCommandBytes = 64 << 10  // 64 KiB (non-attest)
 	maxAttestCommandBytes = 512 << 10 // 512 KiB (attest)
-	maxSealedCommandBytes = 512 << 10 // 512 KiB (sealed vote/resolve)
+	maxSealedCommandBytes = 4 << 20   // 4 MiB (8-round sealed vote / 32-option tally)
 	maxAccordTotalWeight  = uint64(1) << 50
 	maxCachedAccords      = 256
 	accordStoreVersion    = 1
@@ -368,10 +368,14 @@ type VotePayload struct {
 }
 
 // VetoPayload records one participant's signed bounded veto on an option.
+// On BallotPrivacySealedPaillier Accords, if the actor has already submitted a
+// SealedBallot, DissentRandomness must open their recorded DissentCT == E(1; r)
+// for OptionID so a vetoer cannot secretly approve or abstain on the same option.
 type VetoPayload struct {
-	OptionID    string   `json:"option_id"`
-	ReasonHash  string   `json:"reason_hash"`
-	EvidenceIDs []string `json:"evidence_ids,omitempty"`
+	OptionID          string   `json:"option_id"`
+	ReasonHash        string   `json:"reason_hash"`
+	EvidenceIDs       []string `json:"evidence_ids,omitempty"`
+	DissentRandomness []byte   `json:"dissent_randomness,omitempty"`
 }
 
 // ResolvePayload triggers deterministic collective resolution at [VoteByHeight, ResolveByHeight).
@@ -804,11 +808,18 @@ func (a *Accord) Apply(cmd AccordCommand, signature []byte, height uint64) (stri
 			}
 		}
 		if a.spec.Rules.BallotPrivacy != BallotPrivacySealedPaillier {
+			if len(vp.DissentRandomness) != 0 {
+				return "", ErrAccordSpec
+			}
 			for _, existingVote := range v.Votes {
 				if existingVote.Actor == cmd.Actor && existingVote.OptionID == vp.OptionID &&
 					(existingVote.Position == BallotApprove || existingVote.Position == BallotAbstain) {
 					return "", ErrAccordEquivocation
 				}
+			}
+		} else {
+			if err := a.verifySealedVetoConsistency(v, cmd.Actor, vp.OptionID, vp.DissentRandomness); err != nil {
+				return "", err
 			}
 		}
 		var priorVetoes uint32
@@ -1937,6 +1948,7 @@ func cloneAccordCommand(c AccordCommand) AccordCommand {
 		} else {
 			v.EvidenceIDs = nil
 		}
+		v.DissentRandomness = slices.Clone(c.Veto.DissentRandomness)
 		out.Veto = &v
 	}
 	if c.Resolve != nil {

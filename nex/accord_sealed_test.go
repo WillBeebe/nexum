@@ -69,6 +69,28 @@ func newSealedAccordFixture(t *testing.T, sharedKey *SealedTallyKey) sealedAccor
 	return sealedAccordFixture{fx: fx, tallyKey: sharedKey, tally: tally}
 }
 
+func castSealedVoteWithVetoes(
+	t *testing.T,
+	a *Accord,
+	actor accordActor,
+	grant string,
+	height uint64,
+	reqID string,
+	choices map[string]BallotPosition,
+	vetoedOptions []string,
+	rationale string,
+) string {
+	t.Helper()
+	b := a.Bundle()
+	sealed, err := EncryptSealedBallotWithVetoes(b.Spec, a.View().ID, actor.pub.ID(), choices, vetoedOptions, Hash(rationale))
+	if err != nil {
+		t.Fatalf("EncryptSealedBallotWithVetoes(%s): %v", reqID, err)
+	}
+	return accordMustApply(t, a, actor, grant, "vote", reqID, height, func(c *AccordCommand) {
+		c.Vote = &VotePayload{Sealed: sealed}
+	})
+}
+
 func castSealedVote(
 	t *testing.T,
 	a *Accord,
@@ -80,14 +102,7 @@ func castSealedVote(
 	rationale string,
 ) string {
 	t.Helper()
-	b := a.Bundle()
-	sealed, err := EncryptSealedBallot(b.Spec, a.View().ID, actor.pub.ID(), choices, Hash(rationale))
-	if err != nil {
-		t.Fatalf("EncryptSealedBallot(%s): %v", reqID, err)
-	}
-	return accordMustApply(t, a, actor, grant, "vote", reqID, height, func(c *AccordCommand) {
-		c.Vote = &VotePayload{Sealed: sealed}
-	})
+	return castSealedVoteWithVetoes(t, a, actor, grant, height, reqID, choices, nil, rationale)
 }
 
 func resolveSealedAccord(t *testing.T, a *Accord, tallyKey *SealedTallyKey, tallyActor accordActor, grant string, height uint64, reqID string) string {
@@ -272,10 +287,10 @@ func TestSealedAccordLifecycleDecidedPrivacyAndOfflineVerify(t *testing.T) {
 	accordMustApply(t, a, sf.fx.safety, "safety-vote", "veto", "safety-veto-full", 2, func(c *AccordCommand) {
 		c.Veto = &VetoPayload{OptionID: "full-rollout", ReasonHash: Hash("unsafe")}
 	})
-	castSealedVote(t, a, sf.fx.safety, "safety-vote", 3, "v-safety", map[string]BallotPosition{
+	castSealedVoteWithVetoes(t, a, sf.fx.safety, "safety-vote", 3, "v-safety", map[string]BallotPosition{
 		"canary-rollout": BallotApprove,
 		"full-rollout":   BallotDissent,
-	}, "safety-ballot")
+	}, []string{"full-rollout"}, "safety-ballot")
 	castSealedVote(t, a, sf.fx.sre, "sre-vote", 4, "v-sre", map[string]BallotPosition{
 		"canary-rollout": BallotApprove,
 		"hold-release":   BallotDissent,
@@ -468,10 +483,10 @@ func TestSealedAccordRulesDeadlocksVetoesRolesAndZeroBallots(t *testing.T) {
 			c.Veto = &VetoPayload{OptionID: "full-rollout", ReasonHash: Hash("risk")}
 		})
 		// Safety vetoes full-rollout, dissents on full-rollout, and approves hold-release.
-		castSealedVote(t, a, sf.fx.safety, "safety-vote", 3, "v-saf", map[string]BallotPosition{
+		castSealedVoteWithVetoes(t, a, sf.fx.safety, "safety-vote", 3, "v-saf", map[string]BallotPosition{
 			"full-rollout": BallotDissent,
 			"hold-release": BallotApprove,
-		}, "r-saf")
+		}, []string{"full-rollout"}, "r-saf")
 		// release(2) + sre(2) + sec(1) = weight 5 overrides safety veto on full-rollout!
 		castSealedVote(t, a, sf.fx.release, "release-vote", 3, "v-rel", map[string]BallotPosition{
 			"full-rollout": BallotApprove,
