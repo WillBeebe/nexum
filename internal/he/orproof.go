@@ -5,31 +5,40 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"math/big"
+	"sync"
 )
 
 const (
-	bitORDomain      = "nexum/he/bit-or-v1\x00"
-	maxBitProofBytes = 64 << 10 // 64 KiB
+	bitORDomain      = "nexum/he/bit-or-v2\x00"
+	bitORRounds      = 8
+	maxBitProofBytes = 128 << 10 // 128 KiB
 )
 
 // ErrBitProof indicates a malformed, non-canonical, or mathematically invalid
 // CDS94 disjunctive {0,1} Paillier OR-proof.
 var ErrBitProof = errors.New("he: invalid bit proof")
 
-// bitORProof is a Cramer-Damgård-Schoenmakers (CDS94) disjunctive proof that
-// a Paillier ciphertext c in Z_{N^2}* encrypts 0 (c == r^N mod N^2) OR 1
-// (c * g^-1 == r^N mod N^2) without revealing which branch holds.
-type bitORProof struct {
+// bitORRound is one parallel Cramer-Damgård-Schoenmakers (CDS94) disjunctive
+// Sigma round proving c == r^N mod N^2 OR c * g^-1 == r^N mod N^2.
+type bitORRound struct {
 	A0 []byte `json:"a0"`
 	A1 []byte `json:"a1"`
 	E0 []byte `json:"e0"`
 	E1 []byte `json:"e1"`
 	Z0 []byte `json:"z0"`
 	Z1 []byte `json:"z1"`
+}
+
+// bitORProof binds bitORRounds (8) parallel CDS94 rounds under a single joint
+// Fiat-Shamir hash so soundness against an untrusted modulus with smallest
+// prime factor p > 65537 is <= (1/65539)^8 < 2^-128.
+type bitORProof struct {
+	Rounds []bitORRound `json:"rounds"`
 }
 
 func (p *Paillier) validPublic() bool {
@@ -50,20 +59,35 @@ func decodeBitORProof(proof []byte) (bitORProof, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return bitORProof{}, ErrBitProof
 	}
+	if len(pf.Rounds) != bitORRounds {
+		return bitORProof{}, ErrBitProof
+	}
 	return pf, nil
 }
 
-func bitORChallenge(mod *big.Int, domain, ct, a0, a1 []byte) [sha256.Size]byte {
+func bitORChallenges(mod *big.Int, domain, ct []byte, a0s, a1s [][]byte) [bitORRounds][sha256.Size]byte {
 	h := sha256.New()
 	h.Write([]byte(bitORDomain))
 	writeLenFramed(h, mod.Bytes())
 	writeLenFramed(h, domain)
 	writeLenFramed(h, ct)
-	writeLenFramed(h, a0)
-	writeLenFramed(h, a1)
-	var sum [sha256.Size]byte
-	copy(sum[:], h.Sum(nil))
-	return sum
+	for i := 0; i < bitORRounds; i++ {
+		writeLenFramed(h, a0s[i])
+		writeLenFramed(h, a1s[i])
+	}
+	root := h.Sum(nil)
+
+	var out [bitORRounds][sha256.Size]byte
+	var idxBuf [4]byte
+	for i := 0; i < bitORRounds; i++ {
+		binary.BigEndian.PutUint32(idxBuf[:], uint32(i))
+		rh := sha256.New()
+		rh.Write([]byte(bitORDomain))
+		rh.Write(root)
+		rh.Write(idxBuf[:])
+		copy(out[i][:], rh.Sum(nil))
+	}
+	return out
 }
 
 // EncryptBitWithR encrypts bit in {0, 1} using a fresh random unit r in Z_N*,
@@ -112,9 +136,10 @@ func (p *Paillier) Scale(ct []byte, scalar uint64) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// ProveBit builds a CDS94 non-interactive zero-knowledge OR-proof that ct
-// encrypts bit in {0, 1} with randomness r under domain separation bytes.
-// Works on public-key-only *Paillier instances from FromPublic.
+// ProveBit builds a bitORRounds-parallel CDS94 non-interactive zero-knowledge
+// OR-proof bound under one joint Fiat-Shamir challenge that ct encrypts bit in
+// {0, 1} with randomness r under domain separation bytes. Works on
+// public-key-only *Paillier instances from FromPublic.
 func (p *Paillier) ProveBit(ct, r *big.Int, bit int, domain []byte) ([]byte, error) {
 	if !p.validPublic() || (bit != 0 && bit != 1) || !unit(ct, p.n2) || !unit(r, p.n) {
 		return nil, ErrEnc
@@ -133,76 +158,105 @@ func (p *Paillier) ProveBit(ct, r *big.Int, bit int, domain []byte) ([]byte, err
 	}
 
 	sim := 1 - bit
-	w, err := randomUnit(p.n)
-	if err != nil {
-		return nil, ErrEnc
-	}
-	zSim, err := randomUnit(p.n)
-	if err != nil {
-		return nil, ErrEnc
-	}
-	var eSimBytes [sha256.Size]byte
-	if _, err := io.ReadFull(rand.Reader, eSimBytes[:]); err != nil {
-		return nil, ErrEnc
-	}
-
-	var a [2]*big.Int
-	a[bit] = new(big.Int).Exp(w, p.n, p.n2)
-
 	uSimInv := new(big.Int).ModInverse(u[sim], p.n2)
 	if uSimInv == nil {
 		return nil, ErrEnc
 	}
-	eSim := new(big.Int).SetBytes(eSimBytes[:])
-	aSim := new(big.Int).Exp(uSimInv, eSim, p.n2)
-	aSim.Mul(aSim, new(big.Int).Exp(zSim, p.n, p.n2))
-	aSim.Mod(aSim, p.n2)
-	a[sim] = aSim
-
 	ctBytes := ct.Bytes()
-	a0Bytes := a[0].Bytes()
-	a1Bytes := a[1].Bytes()
-	if !isCanonicalPositive(ctBytes) || !isCanonicalPositive(a0Bytes) || !isCanonicalPositive(a1Bytes) {
+	if !isCanonicalPositive(ctBytes) {
 		return nil, ErrEnc
 	}
 
-	challenge := bitORChallenge(p.n, domain, ctBytes, a0Bytes, a1Bytes)
-
-	var e [2][]byte
-	e[sim] = append([]byte(nil), eSimBytes[:]...)
-	eRealBytes := make([]byte, sha256.Size)
-	for i := range eRealBytes {
-		eRealBytes[i] = challenge[i] ^ eSimBytes[i]
+	ws := make([]*big.Int, bitORRounds)
+	zSims := make([]*big.Int, bitORRounds)
+	eSims := make([][sha256.Size]byte, bitORRounds)
+	for i := 0; i < bitORRounds; i++ {
+		w, err := randomUnit(p.n)
+		if err != nil {
+			return nil, ErrEnc
+		}
+		zSim, err := randomUnit(p.n)
+		if err != nil {
+			return nil, ErrEnc
+		}
+		if _, err := io.ReadFull(rand.Reader, eSims[i][:]); err != nil {
+			return nil, ErrEnc
+		}
+		ws[i] = w
+		zSims[i] = zSim
 	}
-	e[bit] = eRealBytes
 
-	eReal := new(big.Int).SetBytes(eRealBytes)
-	var z [2]*big.Int
-	z[sim] = zSim
-	zReal := new(big.Int).Exp(r, eReal, p.n)
-	zReal.Mul(zReal, w)
-	zReal.Mod(zReal, p.n)
-	if !unit(zReal, p.n) {
-		return nil, ErrEnc
+	a0s := make([][]byte, bitORRounds)
+	a1s := make([][]byte, bitORRounds)
+	var wg sync.WaitGroup
+	wg.Add(bitORRounds)
+	for i := 0; i < bitORRounds; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			var a [2]*big.Int
+			a[bit] = new(big.Int).Exp(ws[idx], p.n, p.n2)
+
+			eSim := new(big.Int).SetBytes(eSims[idx][:])
+			aSim := new(big.Int).Exp(uSimInv, eSim, p.n2)
+			aSim.Mul(aSim, new(big.Int).Exp(zSims[idx], p.n, p.n2))
+			aSim.Mod(aSim, p.n2)
+			a[sim] = aSim
+
+			a0s[idx] = a[0].Bytes()
+			a1s[idx] = a[1].Bytes()
+		}(i)
 	}
-	z[bit] = zReal
+	wg.Wait()
 
-	out, err := json.Marshal(bitORProof{
-		A0: a0Bytes,
-		A1: a1Bytes,
-		E0: e[0],
-		E1: e[1],
-		Z0: z[0].Bytes(),
-		Z1: z[1].Bytes(),
-	})
+	for i := 0; i < bitORRounds; i++ {
+		if !isCanonicalPositive(a0s[i]) || !isCanonicalPositive(a1s[i]) {
+			return nil, ErrEnc
+		}
+	}
+
+	challenges := bitORChallenges(p.n, domain, ctBytes, a0s, a1s)
+
+	rounds := make([]bitORRound, bitORRounds)
+	for i := 0; i < bitORRounds; i++ {
+		var e [2][]byte
+		e[sim] = append([]byte(nil), eSims[i][:]...)
+		eRealBytes := make([]byte, sha256.Size)
+		for j := range eRealBytes {
+			eRealBytes[j] = challenges[i][j] ^ eSims[i][j]
+		}
+		e[bit] = eRealBytes
+
+		eReal := new(big.Int).SetBytes(eRealBytes)
+		var z [2]*big.Int
+		z[sim] = zSims[i]
+		zReal := new(big.Int).Exp(r, eReal, p.n)
+		zReal.Mul(zReal, ws[i])
+		zReal.Mod(zReal, p.n)
+		if !unit(zReal, p.n) {
+			return nil, ErrEnc
+		}
+		z[bit] = zReal
+
+		rounds[i] = bitORRound{
+			A0: a0s[i],
+			A1: a1s[i],
+			E0: e[0],
+			E1: e[1],
+			Z0: z[0].Bytes(),
+			Z1: z[1].Bytes(),
+		}
+	}
+
+	out, err := json.Marshal(bitORProof{Rounds: rounds})
 	if err != nil {
 		return nil, ErrEnc
 	}
 	return out, nil
 }
 
-// VerifyBit verifies a CDS94 disjunctive {0,1} Paillier OR-proof against
-// canonical ciphertext ct and domain separation bytes using only the public key.
+// VerifyBit verifies a bitORRounds-parallel CDS94 disjunctive {0,1} Paillier
+// OR-proof against canonical ciphertext ct and domain separation bytes using
+// only the public key.
 func (p *Paillier) VerifyBit(ct []byte, proof []byte, domain []byte) error {
 	if !p.validPublic() {
 		return ErrBitProof
@@ -220,30 +274,49 @@ func (p *Paillier) VerifyBit(ct []byte, proof []byte, domain []byte) error {
 	if err != nil {
 		return err
 	}
-	if !isCanonicalPositive(pf.A0) || len(pf.A0) > n2Len ||
-		!isCanonicalPositive(pf.A1) || len(pf.A1) > n2Len ||
-		!isCanonicalPositive(pf.Z0) || len(pf.Z0) > nLen ||
-		!isCanonicalPositive(pf.Z1) || len(pf.Z1) > nLen {
-		return ErrBitProof
-	}
-	if len(pf.E0) != sha256.Size || len(pf.E1) != sha256.Size {
-		return ErrBitProof
-	}
-	a0 := new(big.Int).SetBytes(pf.A0)
-	a1 := new(big.Int).SetBytes(pf.A1)
-	z0 := new(big.Int).SetBytes(pf.Z0)
-	z1 := new(big.Int).SetBytes(pf.Z1)
-	if !unit(a0, p.n2) || !unit(a1, p.n2) || !unit(z0, p.n) || !unit(z1, p.n) {
-		return ErrBitProof
+
+	a0Bytes := make([][]byte, bitORRounds)
+	a1Bytes := make([][]byte, bitORRounds)
+	a0s := make([]*big.Int, bitORRounds)
+	a1s := make([]*big.Int, bitORRounds)
+	z0s := make([]*big.Int, bitORRounds)
+	z1s := make([]*big.Int, bitORRounds)
+
+	for i, rd := range pf.Rounds {
+		if !isCanonicalPositive(rd.A0) || len(rd.A0) > n2Len ||
+			!isCanonicalPositive(rd.A1) || len(rd.A1) > n2Len ||
+			!isCanonicalPositive(rd.Z0) || len(rd.Z0) > nLen ||
+			!isCanonicalPositive(rd.Z1) || len(rd.Z1) > nLen {
+			return ErrBitProof
+		}
+		if len(rd.E0) != sha256.Size || len(rd.E1) != sha256.Size {
+			return ErrBitProof
+		}
+		a0 := new(big.Int).SetBytes(rd.A0)
+		a1 := new(big.Int).SetBytes(rd.A1)
+		z0 := new(big.Int).SetBytes(rd.Z0)
+		z1 := new(big.Int).SetBytes(rd.Z1)
+		if !unit(a0, p.n2) || !unit(a1, p.n2) || !unit(z0, p.n) || !unit(z1, p.n) {
+			return ErrBitProof
+		}
+		a0Bytes[i] = rd.A0
+		a1Bytes[i] = rd.A1
+		a0s[i] = a0
+		a1s[i] = a1
+		z0s[i] = z0
+		z1s[i] = z1
 	}
 
-	expected := bitORChallenge(p.n, domain, ct, pf.A0, pf.A1)
+	expected := bitORChallenges(p.n, domain, ct, a0Bytes, a1Bytes)
+
 	var xor [sha256.Size]byte
-	for i := range xor {
-		xor[i] = pf.E0[i] ^ pf.E1[i]
-	}
-	if subtle.ConstantTimeCompare(xor[:], expected[:]) != 1 {
-		return ErrBitProof
+	for i, rd := range pf.Rounds {
+		for j := range xor {
+			xor[j] = rd.E0[j] ^ rd.E1[j]
+		}
+		if subtle.ConstantTimeCompare(xor[:], expected[i][:]) != 1 {
+			return ErrBitProof
+		}
 	}
 
 	gInv := new(big.Int).ModInverse(p.g, p.n2)
@@ -253,11 +326,28 @@ func (p *Paillier) VerifyBit(ct []byte, proof []byte, domain []byte) error {
 	u0 := c
 	u1 := new(big.Int).Mod(new(big.Int).Mul(c, gInv), p.n2)
 
-	if !verifyORBranch(p.n, p.n2, u0, a0, new(big.Int).SetBytes(pf.E0), z0) {
-		return ErrBitProof
+	var roundOK [bitORRounds]bool
+	var wg sync.WaitGroup
+	wg.Add(bitORRounds)
+	for i := 0; i < bitORRounds; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			rd := pf.Rounds[idx]
+			if !verifyORBranch(p.n, p.n2, u0, a0s[idx], new(big.Int).SetBytes(rd.E0), z0s[idx]) {
+				return
+			}
+			if !verifyORBranch(p.n, p.n2, u1, a1s[idx], new(big.Int).SetBytes(rd.E1), z1s[idx]) {
+				return
+			}
+			roundOK[idx] = true
+		}(i)
 	}
-	if !verifyORBranch(p.n, p.n2, u1, a1, new(big.Int).SetBytes(pf.E1), z1) {
-		return ErrBitProof
+	wg.Wait()
+
+	for _, ok := range roundOK {
+		if !ok {
+			return ErrBitProof
+		}
 	}
 	return nil
 }

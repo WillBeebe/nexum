@@ -291,18 +291,34 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 	cacheMissValidations := 0
 	sawCheckpoint := false
 	seen := make(map[string]bool)
-	seenGates := make(map[string]bool)
+	seenGates := make(map[string]AccordGate)
 	var tasks []TaskSpec
 	var gates []AccordGate
 	for _, rev := range plan.Revisions {
 		for _, g := range rev.Revision.Gates {
-			if seenGates[g.ID] {
+			if _, dup := seenGates[g.ID]; dup {
 				return nil, 0, ErrCorruptStore
 			}
-			seenGates[g.ID] = true
+			if g.validate(goalID) != nil {
+				return nil, 0, ErrCorruptStore
+			}
+			seenGates[g.ID] = g
 			gates = append(gates, g)
 		}
 		for _, t := range rev.Revision.Tasks {
+			if validateTaskGateDependencies(t.GateDependencies) != nil {
+				return nil, 0, ErrCorruptStore
+			}
+			for _, gd := range t.GateDependencies {
+				g, ok := seenGates[gd.GateID]
+				if !ok {
+					return nil, 0, ErrCorruptStore
+				}
+				if gd.RequiredPhase == AccordPhaseDecided && len(g.AllowedOptions) > 0 &&
+					!slices.Contains(g.AllowedOptions, gd.OptionID) {
+					return nil, 0, ErrCorruptStore
+				}
+			}
 			tid := t.ID()
 			if seen[tid] {
 				continue
@@ -339,12 +355,9 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 		out = append(out, d)
 	}
 	for _, g := range gates {
-		if g.validate(goalID) != nil {
-			return nil, cacheMissValidations, ErrCorruptStore
-		}
 		gateKey := gateRecordKey(goalID, g.ID)
 		err := s.store.withLocked(gateKey, func(tx checkpointTx) error {
-			loaded, fromCache, err := s.loadGateAuthenticatedCached(tx, goalID, g.ID, g.AccordID)
+			loaded, fromCache, err := s.loadGateAuthenticatedCached(tx, goalID, g.ID, g.AccordID, g.AllowedOptions)
 			if errors.Is(err, ErrNotFound) {
 				return nil
 			}
@@ -399,7 +412,7 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 		for _, dep := range t.GateDependencies {
 			gateState, ok := gateStates[dep.GateID]
 			if !ok {
-				if !seenGates[dep.GateID] {
+				if _, declared := seenGates[dep.GateID]; !declared {
 					return nil, cacheMissValidations, ErrCorruptStore
 				}
 				gatesReady = false

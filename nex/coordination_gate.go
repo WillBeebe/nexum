@@ -216,7 +216,8 @@ func detachedGate(gate AccordGate, goalID, gateID string) (AccordGate, error) {
 }
 
 // Gate returns a detached copy of gateID from goalID's signed plan,
-// leveraging GoalStore's cache safely and returning ErrNotFound if absent.
+// authenticating the current checkpoint before reusing GoalStore's cache
+// and returning ErrNotFound if absent.
 func (s *GoalStore) Gate(goalID, gateID string) (AccordGate, error) {
 	if err := validateStoreID(goalID); err != nil {
 		return AccordGate{}, err
@@ -224,16 +225,9 @@ func (s *GoalStore) Gate(goalID, gateID string) (AccordGate, error) {
 	if !coordinationName(gateID) || !validUTF8NoControl(gateID) {
 		return AccordGate{}, ErrPlan
 	}
-	if cached := s.cached.Load(); cached != nil && cached.id == goalID {
-		if gate, ok := cached.record.gate(gateID); ok {
-			s.store.cacheHits.Add(1)
-			return detachedGate(gate, goalID, gateID)
-		}
-	}
-	s.store.cacheMisses.Add(1)
 	var gate AccordGate
 	err := s.store.withLocked(goalID, func(tx checkpointTx) error {
-		record, err := s.loadWith(tx, goalID)
+		record, err := s.loadAuthenticatedCached(tx, goalID)
 		if err != nil {
 			return err
 		}
@@ -242,11 +236,7 @@ func (s *GoalStore) Gate(goalID, gateID string) (AccordGate, error) {
 		if !ok {
 			return ErrNotFound
 		}
-		if err := s.confirmPlan(); err != nil {
-			return err
-		}
-		s.cached.Store(&cachedGoal{id: goalID, record: record})
-		return nil
+		return s.confirmPlan()
 	})
 	if err != nil {
 		return AccordGate{}, err
@@ -254,7 +244,7 @@ func (s *GoalStore) Gate(goalID, gateID string) (AccordGate, error) {
 	return detachedGate(gate, goalID, gateID)
 }
 
-func validateGateResolution(res GateResolution, goalID, gateID, expectedAccordID string) error {
+func validateGateResolution(res GateResolution, goalID, gateID, expectedAccordID string, allowedOptions []string) error {
 	if !validUTF8NoControl(res.GoalID) || !validUTF8NoControl(res.GateID) ||
 		!validUTF8NoControl(res.AccordID) || !validUTF8NoControl(res.Head) ||
 		!validUTF8NoControl(string(res.Phase)) || !validUTF8NoControl(res.WinningOptionID) ||
@@ -276,6 +266,9 @@ func validateGateResolution(res GateResolution, goalID, gateID, expectedAccordID
 		if !validAccordID(res.WinningOptionID) || !protocolHash(res.WinningCommitment) || res.DeadlockReason != "" {
 			return ErrCorruptStore
 		}
+		if len(allowedOptions) > 0 && !slices.Contains(allowedOptions, res.WinningOptionID) {
+			return ErrCorruptStore
+		}
 	case AccordPhaseDeadlocked:
 		if res.WinningOptionID != "" || res.WinningCommitment != "" || !validDeadlockReason(res.DeadlockReason) {
 			return ErrCorruptStore
@@ -290,14 +283,14 @@ func validateGateResolution(res GateResolution, goalID, gateID, expectedAccordID
 	return nil
 }
 
-func validateGateCheckpoint(cp gateCheckpoint, goalID, gateID, expectedAccordID string) error {
+func validateGateCheckpoint(cp gateCheckpoint, goalID, gateID, expectedAccordID string, allowedOptions []string) error {
 	if cp.Version != gateCheckpointVersion {
 		return ErrCorruptStore
 	}
-	return validateGateResolution(cp.Resolution, goalID, gateID, expectedAccordID)
+	return validateGateResolution(cp.Resolution, goalID, gateID, expectedAccordID, allowedOptions)
 }
 
-func (s *CoordinationStore) loadGateWith(tx checkpointTx, goalID, gateID string) (GateResolution, error) {
+func (s *CoordinationStore) loadGateWith(tx checkpointTx, goalID, gateID, expectedAccordID string, allowedOptions []string) (GateResolution, error) {
 	key := gateRecordKey(goalID, gateID)
 	raw, _, err := s.store.readEncryptedWithMeta(tx, key)
 	if err != nil {
@@ -305,13 +298,13 @@ func (s *CoordinationStore) loadGateWith(tx checkpointTx, goalID, gateID string)
 	}
 	s.store.replayValidationOps.Add(1)
 	var cp gateCheckpoint
-	if json.Unmarshal(raw, &cp) != nil || validateGateCheckpoint(cp, goalID, gateID, "") != nil {
+	if json.Unmarshal(raw, &cp) != nil || validateGateCheckpoint(cp, goalID, gateID, expectedAccordID, allowedOptions) != nil {
 		return GateResolution{}, ErrCorruptStore
 	}
 	return cp.Resolution, nil
 }
 
-func (s *CoordinationStore) loadGateAuthenticatedCached(tx checkpointTx, goalID, gateID, expectedAccordID string) (res GateResolution, fromCache bool, err error) {
+func (s *CoordinationStore) loadGateAuthenticatedCached(tx checkpointTx, goalID, gateID, expectedAccordID string, allowedOptions []string) (res GateResolution, fromCache bool, err error) {
 	key := gateRecordKey(goalID, gateID)
 	plainJSON, meta, err := s.store.readEncryptedWithMeta(tx, key)
 	if err != nil {
@@ -322,7 +315,7 @@ func (s *CoordinationStore) loadGateAuthenticatedCached(tx checkpointTx, goalID,
 	entry, hit := s.gateCache[key]
 	s.mu.Unlock()
 	if hit && entry.meta.same(meta) && entry.plainDigest == plainDigest {
-		if validateGateResolution(entry.resolution, goalID, gateID, expectedAccordID) != nil {
+		if validateGateResolution(entry.resolution, goalID, gateID, expectedAccordID, allowedOptions) != nil {
 			return GateResolution{}, false, ErrCorruptStore
 		}
 		s.store.cacheHits.Add(1)
@@ -331,7 +324,7 @@ func (s *CoordinationStore) loadGateAuthenticatedCached(tx checkpointTx, goalID,
 	s.store.cacheMisses.Add(1)
 	s.store.replayValidationOps.Add(1)
 	var cp gateCheckpoint
-	if json.Unmarshal(plainJSON, &cp) != nil || validateGateCheckpoint(cp, goalID, gateID, expectedAccordID) != nil {
+	if json.Unmarshal(plainJSON, &cp) != nil || validateGateCheckpoint(cp, goalID, gateID, expectedAccordID, allowedOptions) != nil {
 		return GateResolution{}, false, ErrCorruptStore
 	}
 	s.mu.Lock()
@@ -407,14 +400,14 @@ func (s *CoordinationStore) RecordAccord(goalID, gateID string, bundle AccordBun
 		OutcomeHash:       view.Outcome.Hash(),
 		ResolvedAtHeight:  view.Outcome.ResolvedAtHeight,
 	}
-	if err := validateGateResolution(candidate, goalID, gateID, gate.AccordID); err != nil {
+	if err := validateGateResolution(candidate, goalID, gateID, gate.AccordID, gate.AllowedOptions); err != nil {
 		return GateResolution{}, fmt.Errorf("%w: invalid accord outcome", ErrAccordSpec)
 	}
 
 	key := gateRecordKey(goalID, gateID)
 	var out GateResolution
 	err = s.store.withLocked(key, func(tx checkpointTx) error {
-		existing, loadErr := s.loadGateWith(tx, goalID, gateID)
+		existing, loadErr := s.loadGateWith(tx, goalID, gateID, gate.AccordID, gate.AllowedOptions)
 		if loadErr == nil {
 			if existing.AccordID == candidate.AccordID && existing.Head == candidate.Head {
 				if existing != candidate {
@@ -445,19 +438,11 @@ func (s *CoordinationStore) RecordAccord(goalID, gateID string, bundle AccordBun
 	return out, nil
 }
 
-// GateStatus loads and validates the persisted GateResolution for (goalID, gateID),
-// confirming durability, or returns ErrNotFound if unresolved.
-func (s *CoordinationStore) GateStatus(goalID, gateID string) (GateResolution, error) {
-	if err := validateStoreID(goalID); err != nil {
-		return GateResolution{}, err
-	}
-	if !coordinationName(gateID) || !validUTF8NoControl(gateID) {
-		return GateResolution{}, ErrPlan
-	}
-	key := gateRecordKey(goalID, gateID)
+func (s *CoordinationStore) gateStatusForGate(goalID string, gate AccordGate) (GateResolution, error) {
+	key := gateRecordKey(goalID, gate.ID)
 	var out GateResolution
 	err := s.store.withLocked(key, func(tx checkpointTx) error {
-		res, err := s.loadGateWith(tx, goalID, gateID)
+		res, err := s.loadGateWith(tx, goalID, gate.ID, gate.AccordID, gate.AllowedOptions)
 		if err != nil {
 			return err
 		}
@@ -471,6 +456,17 @@ func (s *CoordinationStore) GateStatus(goalID, gateID string) (GateResolution, e
 		return GateResolution{}, err
 	}
 	return out, nil
+}
+
+// GateStatus loads and validates the persisted GateResolution for (goalID, gateID)
+// against the goal plan's pinned AccordGate, confirming durability, or returns
+// ErrNotFound if undeclared or unresolved.
+func (s *CoordinationStore) GateStatus(goalID, gateID string) (GateResolution, error) {
+	gate, err := s.goals.Gate(goalID, gateID)
+	if err != nil {
+		return GateResolution{}, err
+	}
+	return s.gateStatusForGate(goalID, gate)
 }
 
 func gateSatisfiesDependency(res GateResolution, dep TaskGateDependency) bool {
@@ -500,7 +496,14 @@ func gateSatisfiesDependency(res GateResolution, dep TaskGateDependency) bool {
 
 func (s *CoordinationStore) checkGateDependencies(task TaskSpec) error {
 	for _, dep := range task.GateDependencies {
-		res, err := s.GateStatus(task.GoalID, dep.GateID)
+		gate, err := s.goals.Gate(task.GoalID, dep.GateID)
+		if errors.Is(err, ErrNotFound) {
+			return ErrCorruptStore
+		}
+		if err != nil {
+			return err
+		}
+		res, err := s.gateStatusForGate(task.GoalID, gate)
 		if errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("%w: gate %s", ErrTaskDependency, dep.GateID)
 		}

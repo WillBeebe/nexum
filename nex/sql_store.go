@@ -130,7 +130,13 @@ func OpenSQLCoordinationStore(ctx context.Context, db *sql.DB, dialect SQLDialec
 	if err != nil {
 		return nil, err
 	}
-	return &CoordinationStore{store: s, goals: goals, attempts: attempts, cache: make(map[string]cachedTaskCheckpoint)}, nil
+	return &CoordinationStore{
+		store:     s,
+		goals:     goals,
+		attempts:  attempts,
+		cache:     make(map[string]cachedTaskCheckpoint),
+		gateCache: make(map[string]cachedGateCheckpoint),
+	}, nil
 }
 
 // OpenSQLAccordStore opens an encrypted SQL-backed AccordStore. Use a namespace

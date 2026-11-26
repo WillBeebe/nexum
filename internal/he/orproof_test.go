@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math/big"
+	"slices"
 	"testing"
 )
 
@@ -112,6 +113,24 @@ func TestORProofRejectsNonBitsNonUnitsMalleationAndDomainReplay(t *testing.T) {
 	if err := json.Unmarshal(proof, &pf); err != nil {
 		t.Fatal(err)
 	}
+	if len(pf.Rounds) != bitORRounds {
+		t.Fatalf("expected %d rounds, got %d", bitORRounds, len(pf.Rounds))
+	}
+	clonePF := func() bitORProof {
+		out := bitORProof{Rounds: make([]bitORRound, len(pf.Rounds))}
+		for i, rd := range pf.Rounds {
+			out.Rounds[i] = bitORRound{
+				A0: slices.Clone(rd.A0),
+				A1: slices.Clone(rd.A1),
+				E0: slices.Clone(rd.E0),
+				E1: slices.Clone(rd.E1),
+				Z0: slices.Clone(rd.Z0),
+				Z1: slices.Clone(rd.Z1),
+			}
+		}
+		return out
+	}
+
 	malformed := []struct {
 		name string
 		raw  []byte
@@ -126,58 +145,77 @@ func TestORProofRejectsNonBitsNonUnitsMalleationAndDomainReplay(t *testing.T) {
 			}{bitORProof: pf, Extra: "x"})
 			return b
 		}()},
+		{"too_few_rounds", func() []byte {
+			c := clonePF()
+			c.Rounds = c.Rounds[:bitORRounds-1]
+			b, _ := json.Marshal(c)
+			return b
+		}()},
+		{"too_many_rounds", func() []byte {
+			c := clonePF()
+			c.Rounds = append(c.Rounds, c.Rounds[0])
+			b, _ := json.Marshal(c)
+			return b
+		}()},
+		{"duplicated_round_0", func() []byte {
+			c := clonePF()
+			for i := 1; i < bitORRounds; i++ {
+				c.Rounds[i] = c.Rounds[0]
+			}
+			b, _ := json.Marshal(c)
+			return b
+		}()},
 		{"leading_zero_a0", func() []byte {
-			c := pf
-			c.A0 = append([]byte{0}, pf.A0...)
+			c := clonePF()
+			c.Rounds[0].A0 = append([]byte{0}, c.Rounds[0].A0...)
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"leading_zero_a1", func() []byte {
-			c := pf
-			c.A1 = append([]byte{0}, pf.A1...)
+			c := clonePF()
+			c.Rounds[3].A1 = append([]byte{0}, c.Rounds[3].A1...)
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"leading_zero_z0", func() []byte {
-			c := pf
-			c.Z0 = append([]byte{0}, pf.Z0...)
+			c := clonePF()
+			c.Rounds[5].Z0 = append([]byte{0}, c.Rounds[5].Z0...)
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"leading_zero_z1", func() []byte {
-			c := pf
-			c.Z1 = append([]byte{0}, pf.Z1...)
+			c := clonePF()
+			c.Rounds[7].Z1 = append([]byte{0}, c.Rounds[7].Z1...)
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"nonunit_a0_modulus", func() []byte {
-			c := pf
-			c.A0 = priv.N().Bytes()
+			c := clonePF()
+			c.Rounds[2].A0 = priv.N().Bytes()
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"nonunit_z0_zero", func() []byte {
-			c := pf
-			c.Z0 = []byte{0}
+			c := clonePF()
+			c.Rounds[4].Z0 = []byte{0}
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"short_e0", func() []byte {
-			c := pf
-			c.E0 = pf.E0[:31]
+			c := clonePF()
+			c.Rounds[1].E0 = c.Rounds[1].E0[:31]
 			b, _ := json.Marshal(c)
 			return b
 		}()},
 		{"long_e1", func() []byte {
-			c := pf
-			c.E1 = append(bytes.Clone(pf.E1), 0x01)
+			c := clonePF()
+			c.Rounds[6].E1 = append(bytes.Clone(c.Rounds[6].E1), 0x01)
 			b, _ := json.Marshal(c)
 			return b
 		}()},
-		{"flipped_e0", func() []byte {
-			c := pf
-			c.E0 = bytes.Clone(pf.E0)
-			c.E0[0] ^= 0x01
+		{"flipped_e0_last_round", func() []byte {
+			c := clonePF()
+			c.Rounds[bitORRounds-1].E0[0] ^= 0x01
 			b, _ := json.Marshal(c)
 			return b
 		}()},
@@ -188,11 +226,24 @@ func TestORProofRejectsNonBitsNonUnitsMalleationAndDomainReplay(t *testing.T) {
 		}
 	}
 
-	// Length-framing collision test on bitORChallenge.
-	c1 := bitORChallenge(priv.n, []byte("ab"), []byte("cd"), pf.A0, pf.A1)
-	c2 := bitORChallenge(priv.n, []byte("a"), []byte("bcd"), pf.A0, pf.A1)
+	// Length-framing collision test on bitORChallenges.
+	a0s := make([][]byte, bitORRounds)
+	a1s := make([][]byte, bitORRounds)
+	for i, rd := range pf.Rounds {
+		a0s[i] = rd.A0
+		a1s[i] = rd.A1
+	}
+	c1 := bitORChallenges(priv.n, []byte("ab"), []byte("cd"), a0s, a1s)
+	c2 := bitORChallenges(priv.n, []byte("a"), []byte("bcd"), a0s, a1s)
 	if c1 == c2 {
-		t.Fatal("bitORChallenge collided across (domain, ct) boundary")
+		t.Fatal("bitORChallenges collided across (domain, ct) boundary")
+	}
+	// Joint binding check: mutating round 7's A0 MUST change round 0's challenge!
+	a0sMut := slices.Clone(a0s)
+	a0sMut[bitORRounds-1] = append(bytes.Clone(a0s[bitORRounds-1]), 0x01)
+	c3 := bitORChallenges(priv.n, []byte("ab"), []byte("cd"), a0sMut, a1s)
+	if c1[0] == c3[0] {
+		t.Fatal("bitORChallenges failed joint binding across rounds")
 	}
 }
 

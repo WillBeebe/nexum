@@ -2,6 +2,7 @@ package nex
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -351,8 +352,10 @@ type GoalStore struct {
 }
 
 type cachedGoal struct {
-	id     string
-	record goalRecord
+	id          string
+	meta        checkpointMeta
+	plainDigest [32]byte
+	record      goalRecord
 }
 
 func OpenGoalStore(dir string, key []byte) (*GoalStore, error) {
@@ -370,21 +373,50 @@ func (s *GoalStore) Stats() StoreStats {
 	return s.store.Stats()
 }
 
-func (s *GoalStore) loadWith(tx checkpointTx, id string) (goalRecord, error) {
+func parseGoalRecord(raw []byte, id string) (goalRecord, error) {
 	var record goalRecord
-	raw, _, err := s.store.readEncryptedWithMeta(tx, id)
-	if err != nil {
-		return record, err
-	}
-	s.store.replayValidationOps.Add(1)
 	if json.Unmarshal(raw, &record) != nil || record.Version != goalRecordVersion ||
 		record.Plan.Spec.ID() != id || !protocolHash(record.Plan.Head) ||
 		record.Tasks == nil || record.Requests == nil || len(record.Requests) != len(record.Plan.Revisions) {
-		return record, ErrCorruptStore
+		return goalRecord{}, ErrCorruptStore
 	}
 	if record.Gates == nil {
 		record.Gates = make(map[string]goalGateLocation)
 	}
+	return record, nil
+}
+
+func (s *GoalStore) loadWith(tx checkpointTx, id string) (goalRecord, error) {
+	raw, _, err := s.store.readEncryptedWithMeta(tx, id)
+	if err != nil {
+		return goalRecord{}, err
+	}
+	s.store.replayValidationOps.Add(1)
+	return parseGoalRecord(raw, id)
+}
+
+func (s *GoalStore) loadAuthenticatedCached(tx checkpointTx, id string) (goalRecord, error) {
+	plainJSON, meta, err := s.store.readEncryptedWithMeta(tx, id)
+	if err != nil {
+		return goalRecord{}, err
+	}
+	plainDigest := sha256.Sum256(plainJSON)
+	if cached := s.cached.Load(); cached != nil && cached.id == id && cached.meta.same(meta) && cached.plainDigest == plainDigest {
+		s.store.cacheHits.Add(1)
+		return cached.record, nil
+	}
+	s.store.cacheMisses.Add(1)
+	s.store.replayValidationOps.Add(1)
+	record, err := parseGoalRecord(plainJSON, id)
+	if err != nil {
+		return goalRecord{}, err
+	}
+	s.cached.Store(&cachedGoal{
+		id:          id,
+		meta:        meta,
+		plainDigest: plainDigest,
+		record:      record,
+	})
 	return record, nil
 }
 
@@ -440,16 +472,9 @@ func (s *GoalStore) Apply(rev PlanRevision, signature []byte) (string, error) {
 }
 
 func (s *GoalStore) Task(goalID, taskID string) (TaskSpec, error) {
-	if cached := s.cached.Load(); cached != nil && cached.id == goalID {
-		if task, ok := cached.record.task(taskID); ok {
-			s.store.cacheHits.Add(1)
-			return detachedTask(task, goalID, taskID)
-		}
-	}
-	s.store.cacheMisses.Add(1)
 	var task TaskSpec
 	err := s.store.withLocked(goalID, func(tx checkpointTx) error {
-		record, err := s.loadWith(tx, goalID)
+		record, err := s.loadAuthenticatedCached(tx, goalID)
 		if err != nil {
 			return err
 		}
@@ -458,11 +483,7 @@ func (s *GoalStore) Task(goalID, taskID string) (TaskSpec, error) {
 		if !ok {
 			return ErrNotFound
 		}
-		if err := s.confirmPlan(); err != nil {
-			return err
-		}
-		s.cached.Store(&cachedGoal{id: goalID, record: record})
-		return nil
+		return s.confirmPlan()
 	})
 	if err != nil {
 		return TaskSpec{}, err

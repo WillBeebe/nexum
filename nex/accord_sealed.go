@@ -27,13 +27,17 @@ type SealedTallyConfig struct {
 
 // SealedOptionBallot carries one participant's encrypted {0,1} approve and
 // dissent ciphertexts and CDS94 zero-knowledge proofs for a single option.
+// When the voter has already publicly vetoed OptionID, DissentRandomness must
+// open DissentCT == E(1; r) mod N^2, preventing vote+veto equivocation without
+// revealing positions on non-vetoed options.
 type SealedOptionBallot struct {
-	OptionID       string `json:"option_id"`
-	ApproveCT      []byte `json:"approve_ct"`
-	ApproveProof   []byte `json:"approve_proof"`
-	DissentCT      []byte `json:"dissent_ct"`
-	DissentProof   []byte `json:"dissent_proof"`
-	ExclusiveProof []byte `json:"exclusive_proof"`
+	OptionID          string `json:"option_id"`
+	ApproveCT         []byte `json:"approve_ct"`
+	ApproveProof      []byte `json:"approve_proof"`
+	DissentCT         []byte `json:"dissent_ct"`
+	DissentProof      []byte `json:"dissent_proof"`
+	ExclusiveProof    []byte `json:"exclusive_proof"`
+	DissentRandomness []byte `json:"dissent_randomness,omitempty"`
 }
 
 // SealedBallotPayload carries a participant's complete encrypted ballot across
@@ -122,21 +126,38 @@ func (k *SealedTallyKey) PublicKey() []byte {
 // EncryptSealedBallot encrypts a voter's per-option positions using only the
 // Accord's public Paillier key and generates domain-separated CDS94 OR-proofs.
 func EncryptSealedBallot(spec AccordSpec, accordID, actor string, choices map[string]BallotPosition, rationaleHash string) (*SealedBallotPayload, error) {
+	return EncryptSealedBallotWithVetoes(spec, accordID, actor, choices, nil, rationaleHash)
+}
+
+// EncryptSealedBallotWithVetoes encrypts a voter's sealed ballot and attaches
+// DissentRandomness openings on every option in vetoedOptions (which must have
+// position BallotDissent in choices) so a voter who already vetoed those options
+// proves non-equivocation without revealing choices on non-vetoed options.
+func EncryptSealedBallotWithVetoes(spec AccordSpec, accordID, actor string, choices map[string]BallotPosition, vetoedOptions []string, rationaleHash string) (*SealedBallotPayload, error) {
+	payload, _, err := EncryptSealedBallotWithOpenings(spec, accordID, actor, choices, vetoedOptions, rationaleHash)
+	return payload, err
+}
+
+// EncryptSealedBallotWithOpenings behaves like EncryptSealedBallotWithVetoes
+// and additionally returns the canonical per-option dissent randomness for
+// every BallotDissent option so the voter can later supply
+// VetoPayload.DissentRandomness if they veto a dissented option after voting.
+func EncryptSealedBallotWithOpenings(spec AccordSpec, accordID, actor string, choices map[string]BallotPosition, vetoedOptions []string, rationaleHash string) (*SealedBallotPayload, map[string][]byte, error) {
 	if err := spec.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if spec.Rules.BallotPrivacy != BallotPrivacySealedPaillier || spec.SealedTally == nil {
-		return nil, ErrAccordSpec
+		return nil, nil, ErrAccordSpec
 	}
 	if !protocolHash(accordID) || accordID != spec.ID() {
-		return nil, ErrAccordStale
+		return nil, nil, ErrAccordStale
 	}
 	if !protocolHash(actor) || !protocolHash(rationaleHash) {
-		return nil, ErrAccordSpec
+		return nil, nil, ErrAccordSpec
 	}
 	pub, err := he.FromPublic(spec.SealedTally.PublicKey)
 	if err != nil {
-		return nil, ErrAccordSpec
+		return nil, nil, ErrAccordSpec
 	}
 
 	opts := make([]AccordOption, len(spec.Options))
@@ -154,17 +175,29 @@ func EncryptSealedBallot(spec AccordSpec, accordID, actor string, choices map[st
 	approveTotal := 0
 	for optID, pos := range choices {
 		if !declared[optID] || !allowedBallotPosition(pos) {
-			return nil, ErrAccordSpec
+			return nil, nil, ErrAccordSpec
 		}
 		if pos == BallotApprove {
 			approveTotal++
 		}
 	}
 	if spec.Rules.BallotMode == BallotSingleChoice && approveTotal > 1 {
-		return nil, ErrAccordEquivocation
+		return nil, nil, ErrAccordEquivocation
+	}
+
+	vetoed := make(map[string]bool, len(vetoedOptions))
+	for _, optID := range vetoedOptions {
+		if !declared[optID] || vetoed[optID] {
+			return nil, nil, ErrAccordSpec
+		}
+		if choices[optID] != BallotDissent {
+			return nil, nil, ErrAccordEquivocation
+		}
+		vetoed[optID] = true
 	}
 
 	outOpts := make([]SealedOptionBallot, len(opts))
+	dissentOpenings := make(map[string][]byte)
 	prodApproveCT := []byte{1}
 	prodApproveR := big.NewInt(1)
 
@@ -183,53 +216,62 @@ func EncryptSealedBallot(spec AccordSpec, accordID, actor string, choices map[st
 
 		appCT, appR, err := pub.EncryptBitWithR(appBit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		appProof, err := pub.ProveBit(new(big.Int).SetBytes(appCT), appR, appBit, sealedProofDomain(accordID, actor, opt.ID, sealedSlotApprove))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		disCT, disR, err := pub.EncryptBitWithR(disBit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		disProof, err := pub.ProveBit(new(big.Int).SetBytes(disCT), disR, disBit, sealedProofDomain(accordID, actor, opt.ID, sealedSlotDissent))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		exclCT, err := pub.Add(appCT, disCT)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		exclR := pub.MulUnits(appR, disR)
 		if exclR == nil {
-			return nil, ErrAccordSpec
+			return nil, nil, ErrAccordSpec
 		}
 		exclProof, err := pub.ProveBit(new(big.Int).SetBytes(exclCT), exclR, appBit+disBit, sealedProofDomain(accordID, actor, opt.ID, sealedSlotExclusive))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if spec.Rules.BallotMode == BallotSingleChoice {
 			prodApproveCT, err = pub.Add(prodApproveCT, appCT)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			prodApproveR = pub.MulUnits(prodApproveR, appR)
 			if prodApproveR == nil {
-				return nil, ErrAccordSpec
+				return nil, nil, ErrAccordSpec
 			}
 		}
 
+		var disRandBytes []byte
+		if disBit == 1 {
+			dissentOpenings[opt.ID] = disR.Bytes()
+		}
+		if vetoed[opt.ID] {
+			disRandBytes = disR.Bytes()
+		}
+
 		outOpts[i] = SealedOptionBallot{
-			OptionID:       opt.ID,
-			ApproveCT:      appCT,
-			ApproveProof:   appProof,
-			DissentCT:      disCT,
-			DissentProof:   disProof,
-			ExclusiveProof: exclProof,
+			OptionID:          opt.ID,
+			ApproveCT:         appCT,
+			ApproveProof:      appProof,
+			DissentCT:         disCT,
+			DissentProof:      disProof,
+			ExclusiveProof:    exclProof,
+			DissentRandomness: disRandBytes,
 		}
 	}
 
@@ -242,7 +284,7 @@ func EncryptSealedBallot(spec AccordSpec, accordID, actor string, choices map[st
 			sealedProofDomain(accordID, actor, "", sealedSlotSingleChoice),
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -250,7 +292,7 @@ func EncryptSealedBallot(spec AccordSpec, accordID, actor string, choices map[st
 		Options:           outOpts,
 		SingleChoiceProof: singleChoiceProof,
 		RationaleHash:     rationaleHash,
-	}, nil
+	}, dissentOpenings, nil
 }
 
 // TallyAccord replays bundle offline, homomorphically aggregates the sealed
@@ -390,6 +432,50 @@ func sealedProofDomain(accordID, actor, optionID, slotKind string) []byte {
 	return buf
 }
 
+func verifySealedDissentOpening(pub *he.Paillier, dissentCT, dissentRand []byte) bool {
+	if pub == nil || len(dissentRand) == 0 || dissentRand[0] == 0 || len(dissentRand) > len(pub.N().Bytes()) {
+		return false
+	}
+	r := new(big.Int).SetBytes(dissentRand)
+	expectedCT, err := pub.EncryptWithR(big.NewInt(1), r)
+	if err != nil {
+		return false
+	}
+	return pub.Equal(expectedCT, dissentCT)
+}
+
+func (a *Accord) verifySealedVetoConsistency(v AccordView, actor, optionID string, dissentRand []byte) error {
+	var priorBallot *RecordedSealedBallot
+	for i := range v.SealedBallots {
+		if v.SealedBallots[i].Actor == actor {
+			priorBallot = &v.SealedBallots[i]
+			break
+		}
+	}
+	if priorBallot == nil {
+		if len(dissentRand) != 0 {
+			return ErrAccordSpec
+		}
+		return nil
+	}
+	if len(dissentRand) == 0 {
+		return ErrAccordEquivocation
+	}
+	pub, err := he.FromPublic(a.spec.SealedTally.PublicKey)
+	if err != nil {
+		return ErrAccordSpec
+	}
+	for _, ob := range priorBallot.Options {
+		if ob.OptionID == optionID {
+			if !verifySealedDissentOpening(pub, ob.DissentCT, dissentRand) {
+				return ErrAccordEquivocation
+			}
+			return nil
+		}
+	}
+	return ErrAccordEquivocation
+}
+
 func (a *Accord) applySealedVote(v *AccordView, cmd AccordCommand, grant AccordRoleGrant, height uint64, receipt string) error {
 	vp := cmd.Vote
 	if vp.Sealed == nil || vp.OptionID != "" || vp.Position != "" {
@@ -423,9 +509,23 @@ func (a *Accord) applySealedVote(v *AccordView, cmd AccordCommand, grant AccordR
 		return ErrAccordSpec
 	}
 
+	vetoedByActor := make(map[string]bool)
+	for _, vt := range v.Vetoes {
+		if vt.Actor == cmd.Actor {
+			vetoedByActor[vt.OptionID] = true
+		}
+	}
+
 	prodApproveCT := []byte{1}
 	recordedOpts := make([]RecordedSealedOption, len(vp.Sealed.Options))
 	for i, ob := range vp.Sealed.Options {
+		if vetoedByActor[ob.OptionID] {
+			if !verifySealedDissentOpening(pub, ob.DissentCT, ob.DissentRandomness) {
+				return ErrAccordEquivocation
+			}
+		} else if len(ob.DissentRandomness) != 0 {
+			return ErrAccordSpec
+		}
 		if err := pub.VerifyBit(ob.ApproveCT, ob.ApproveProof, sealedProofDomain(v.ID, cmd.Actor, ob.OptionID, sealedSlotApprove)); err != nil {
 			return ErrAccordEvidence
 		}
@@ -737,12 +837,13 @@ func cloneSealedBallotPayload(s *SealedBallotPayload) *SealedBallotPayload {
 		out.Options = make([]SealedOptionBallot, len(s.Options))
 		for i, ob := range s.Options {
 			out.Options[i] = SealedOptionBallot{
-				OptionID:       ob.OptionID,
-				ApproveCT:      slices.Clone(ob.ApproveCT),
-				ApproveProof:   slices.Clone(ob.ApproveProof),
-				DissentCT:      slices.Clone(ob.DissentCT),
-				DissentProof:   slices.Clone(ob.DissentProof),
-				ExclusiveProof: slices.Clone(ob.ExclusiveProof),
+				OptionID:          ob.OptionID,
+				ApproveCT:         slices.Clone(ob.ApproveCT),
+				ApproveProof:      slices.Clone(ob.ApproveProof),
+				DissentCT:         slices.Clone(ob.DissentCT),
+				DissentProof:      slices.Clone(ob.DissentProof),
+				ExclusiveProof:    slices.Clone(ob.ExclusiveProof),
+				DissentRandomness: slices.Clone(ob.DissentRandomness),
 			}
 		}
 	}
