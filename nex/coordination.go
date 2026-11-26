@@ -80,6 +80,8 @@ type TaskDiscovery struct {
 	LeaseUntilHeight     uint64
 	DependenciesReady    bool
 	DependenciesMismatch bool
+	GatesReady           bool
+	GatesMismatch        bool
 }
 
 // CoordinationStore coordinates tasks on a single authoritative host. It uses
@@ -89,12 +91,14 @@ type TaskDiscovery struct {
 const maxCachedTasks = 256
 
 type CoordinationStore struct {
-	store      *Store
-	goals      *GoalStore
-	attempts   *ProtocolStore
-	mu         sync.Mutex
-	cache      map[string]cachedTaskCheckpoint
-	cacheOrder []string
+	store          *Store
+	goals          *GoalStore
+	attempts       *ProtocolStore
+	mu             sync.Mutex
+	cache          map[string]cachedTaskCheckpoint
+	cacheOrder     []string
+	gateCache      map[string]cachedGateCheckpoint
+	gateCacheOrder []string
 }
 
 func OpenCoordinationStore(dir string, key []byte, goals *GoalStore, attempts *ProtocolStore) (*CoordinationStore, error) {
@@ -105,7 +109,13 @@ func OpenCoordinationStore(dir string, key []byte, goals *GoalStore, attempts *P
 	if err != nil {
 		return nil, err
 	}
-	return &CoordinationStore{store: store, goals: goals, attempts: attempts, cache: make(map[string]cachedTaskCheckpoint)}, nil
+	return &CoordinationStore{
+		store:     store,
+		goals:     goals,
+		attempts:  attempts,
+		cache:     make(map[string]cachedTaskCheckpoint),
+		gateCache: make(map[string]cachedGateCheckpoint),
+	}, nil
 }
 
 func (s *CoordinationStore) Stats() StoreStats {
@@ -277,11 +287,21 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 		return nil, 0, err
 	}
 	states := make(map[string]taskCheckpoint)
+	gateStates := make(map[string]GateResolution)
 	cacheMissValidations := 0
 	sawCheckpoint := false
 	seen := make(map[string]bool)
+	seenGates := make(map[string]bool)
 	var tasks []TaskSpec
+	var gates []AccordGate
 	for _, rev := range plan.Revisions {
+		for _, g := range rev.Revision.Gates {
+			if seenGates[g.ID] {
+				return nil, 0, ErrCorruptStore
+			}
+			seenGates[g.ID] = true
+			gates = append(gates, g)
+		}
 		for _, t := range rev.Revision.Tasks {
 			tid := t.ID()
 			if seen[tid] {
@@ -318,6 +338,30 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 		}
 		out = append(out, d)
 	}
+	for _, g := range gates {
+		if g.validate(goalID) != nil {
+			return nil, cacheMissValidations, ErrCorruptStore
+		}
+		gateKey := gateRecordKey(goalID, g.ID)
+		err := s.store.withLocked(gateKey, func(tx checkpointTx) error {
+			loaded, fromCache, err := s.loadGateAuthenticatedCached(tx, goalID, g.ID, g.AccordID)
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			sawCheckpoint = true
+			if !fromCache {
+				cacheMissValidations++
+			}
+			gateStates[g.ID] = loaded
+			return nil
+		})
+		if err != nil {
+			return nil, cacheMissValidations, err
+		}
+	}
 	if sawCheckpoint {
 		if err := s.confirm(); err != nil {
 			return nil, cacheMissValidations, err
@@ -325,8 +369,8 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 	}
 	for i := range out {
 		t := out[i].Task
-		ready := true
-		mismatch := false
+		taskDepsReady := true
+		taskDepsMismatch := false
 		for _, dep := range t.Dependencies {
 			depState, ok := states[dep.TaskID]
 			if !ok {
@@ -336,22 +380,40 @@ func (s *CoordinationStore) DiscoverGoal(goalID string, height uint64) ([]TaskDi
 				// Pass 1 already locked and inspected dep.TaskID and observed it as
 				// unclaimed in this snapshot; do not redundantly call s.Result,
 				// inflate cacheMissValidations, swallow storage errors, or tear the snapshot.
-				ready = false
+				taskDepsReady = false
 				continue
 			}
 			res, found := depState.Results[dep.ProtocolID]
 			if !found {
-				ready = false
+				taskDepsReady = false
 				continue
 			}
 			if res.Head != dep.Head || res.Outcome != dep.Outcome ||
 				!slices.Contains(res.Artifacts, TaskArtifact{Slot: dep.Slot, Digest: dep.Digest}) {
-				ready = false
-				mismatch = true
+				taskDepsReady = false
+				taskDepsMismatch = true
 			}
 		}
-		out[i].DependenciesReady = ready
-		out[i].DependenciesMismatch = mismatch
+		gatesReady := true
+		gatesMismatch := false
+		for _, dep := range t.GateDependencies {
+			gateState, ok := gateStates[dep.GateID]
+			if !ok {
+				if !seenGates[dep.GateID] {
+					return nil, cacheMissValidations, ErrCorruptStore
+				}
+				gatesReady = false
+				continue
+			}
+			if !gateSatisfiesDependency(gateState, dep) {
+				gatesReady = false
+				gatesMismatch = true
+			}
+		}
+		out[i].GatesReady = gatesReady
+		out[i].GatesMismatch = gatesMismatch
+		out[i].DependenciesReady = taskDepsReady && gatesReady
+		out[i].DependenciesMismatch = taskDepsMismatch || gatesMismatch
 	}
 	return out, cacheMissValidations, nil
 }
@@ -392,7 +454,7 @@ func (s *CoordinationStore) checkDependencies(task TaskSpec) error {
 			return fmt.Errorf("%w: %s", ErrTaskDependency, dep.Input)
 		}
 	}
-	return nil
+	return s.checkGateDependencies(task)
 }
 
 func checkAttempt(task TaskSpec, request ClaimRequest, spec ProtocolSpec) error {

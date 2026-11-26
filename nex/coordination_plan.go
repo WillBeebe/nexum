@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"sync/atomic"
 	"unicode/utf8"
@@ -82,6 +81,7 @@ type TaskSpec struct {
 	Authority                                            Public
 	Outputs, FailureOutputs                              []string
 	Dependencies                                         []TaskDependency
+	GateDependencies                                     []TaskGateDependency `json:"gate_dependencies,omitempty"`
 }
 
 func (s TaskSpec) ID() string {
@@ -110,7 +110,7 @@ func (s TaskSpec) validate(goalID string) error {
 		}
 		inputs[dep.Input] = true
 	}
-	return nil
+	return validateTaskGateDependencies(s.GateDependencies)
 }
 
 func coordinationText(s string) bool { return small(s) && utf8.ValidString(s) }
@@ -122,6 +122,7 @@ func coordinationName(s string) bool { return validateOperationID(s) == nil }
 type PlanRevision struct {
 	GoalID, Head, Planner, RequestID string
 	Tasks                            []TaskSpec
+	Gates                            []AccordGate `json:"gates,omitempty"`
 }
 
 type SignedPlanRevision struct {
@@ -146,6 +147,7 @@ type goalRecord struct {
 	Version  int
 	Plan     GoalPlan
 	Tasks    map[string]goalTaskLocation
+	Gates    map[string]goalGateLocation `json:",omitempty"`
 	Requests map[string]int
 }
 
@@ -154,6 +156,7 @@ func newGoalRecord(spec GoalSpec) goalRecord {
 		Version:  goalRecordVersion,
 		Plan:     GoalPlan{Spec: spec, Head: spec.ID()},
 		Tasks:    make(map[string]goalTaskLocation),
+		Gates:    make(map[string]goalGateLocation),
 		Requests: make(map[string]int),
 	}
 }
@@ -170,11 +173,34 @@ func (r goalRecord) task(id string) (TaskSpec, bool) {
 	return tasks[location.Task], true
 }
 
+func (r goalRecord) gate(id string) (AccordGate, bool) {
+	location, ok := r.Gates[id]
+	if !ok || location.Revision < 0 || location.Revision >= len(r.Plan.Revisions) {
+		return AccordGate{}, false
+	}
+	gates := r.Plan.Revisions[location.Revision].Revision.Gates
+	if location.Gate < 0 || location.Gate >= len(gates) {
+		return AccordGate{}, false
+	}
+	return gates[location.Gate], true
+}
+
 func (r *goalRecord) apply(goalID string, signed SignedPlanRevision) (head string, advanced bool, err error) {
 	rev := signed.Revision
 	if rev.GoalID != goalID || !protocolHash(rev.Head) || validateOperationID(rev.RequestID) != nil ||
-		len(rev.Tasks) == 0 || len(rev.Tasks) > maxPlanTasks {
+		(len(rev.Tasks) == 0 && len(rev.Gates) == 0) ||
+		len(rev.Tasks) > maxPlanTasks || len(rev.Gates) > maxPlanGates {
 		return "", false, ErrPlan
+	}
+	for _, g := range rev.Gates {
+		if !validAccordGateStrings(g) {
+			return "", false, ErrPlan
+		}
+	}
+	for _, t := range rev.Tasks {
+		if !validTaskGateDependenciesStrings(t.GateDependencies) {
+			return "", false, ErrTaskSpec
+		}
 	}
 	raw, err := json.Marshal(signed)
 	if err != nil || len(raw) > maxPlanRevision {
@@ -199,13 +225,27 @@ func (r *goalRecord) apply(goalID string, signed SignedPlanRevision) (head strin
 			return "", false, ErrCorruptStore
 		}
 		old := r.Plan.Revisions[index]
-		if !reflect.DeepEqual(old.Revision, rev) || !bytes.Equal(old.Signature, signed.Signature) {
+		if !samePlanRevision(old.Revision, rev) || !bytes.Equal(old.Signature, signed.Signature) {
 			return "", false, ErrOperationConflict
 		}
 		return old.Head(), false, nil
 	}
 	if rev.Head != r.Plan.Head {
 		return "", false, ErrPlanHead
+	}
+
+	addedGates := make(map[string]int, len(rev.Gates))
+	for i, g := range rev.Gates {
+		if err := g.validate(goalID); err != nil {
+			return "", false, err
+		}
+		if _, exists := r.Gates[g.ID]; exists {
+			return "", false, ErrPlan
+		}
+		if _, exists := addedGates[g.ID]; exists {
+			return "", false, ErrPlan
+		}
+		addedGates[g.ID] = i
 	}
 
 	added := make(map[string]int, len(rev.Tasks))
@@ -229,11 +269,32 @@ func (r *goalRecord) apply(goalID string, signed SignedPlanRevision) (head strin
 				return "", false, ErrTaskSpec
 			}
 		}
+		for _, gd := range task.GateDependencies {
+			gate, ok := r.gate(gd.GateID)
+			if index, exists := addedGates[gd.GateID]; exists {
+				gate, ok = rev.Gates[index], true
+			}
+			if !ok {
+				return "", false, ErrTaskSpec
+			}
+			if gd.RequiredPhase == AccordPhaseDecided && len(gate.AllowedOptions) > 0 &&
+				!slices.Contains(gate.AllowedOptions, gd.OptionID) {
+				return "", false, ErrTaskSpec
+			}
+		}
 		added[id] = i
 	}
 	index := len(r.Plan.Revisions)
 	for id, i := range added {
 		r.Tasks[id] = goalTaskLocation{Revision: index, Task: i}
+	}
+	if len(addedGates) > 0 {
+		if r.Gates == nil {
+			r.Gates = make(map[string]goalGateLocation, len(addedGates))
+		}
+		for id, i := range addedGates {
+			r.Gates[id] = goalGateLocation{Revision: index, Gate: i}
+		}
 	}
 	head = signed.Head()
 	r.Requests[request] = index
@@ -320,6 +381,9 @@ func (s *GoalStore) loadWith(tx checkpointTx, id string) (goalRecord, error) {
 		record.Plan.Spec.ID() != id || !protocolHash(record.Plan.Head) ||
 		record.Tasks == nil || record.Requests == nil || len(record.Requests) != len(record.Plan.Revisions) {
 		return record, ErrCorruptStore
+	}
+	if record.Gates == nil {
+		record.Gates = make(map[string]goalGateLocation)
 	}
 	return record, nil
 }
@@ -415,6 +479,7 @@ func detachedTask(task TaskSpec, goalID, taskID string) (TaskSpec, error) {
 	task.Outputs = slices.Clone(task.Outputs)
 	task.FailureOutputs = slices.Clone(task.FailureOutputs)
 	task.Dependencies = slices.Clone(task.Dependencies)
+	task.GateDependencies = slices.Clone(task.GateDependencies)
 	return task, nil
 }
 
