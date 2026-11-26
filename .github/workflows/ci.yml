@@ -46,6 +46,8 @@ jobs:
         run: |
           set -euo pipefail
           go test -run=^$ -fuzz=^FuzzVerifyAccordBundle$ -fuzztime=5s ./nex
+          go test -run=^$ -fuzz=^FuzzVerifySealedAccordBundle$ -fuzztime=5s ./nex
+          go test -run=^$ -fuzz=^FuzzVerifyGoalPlanWithGates$ -fuzztime=5s ./nex
           go test -run=^$ -fuzz=^FuzzVerifyTaskHandoff$ -fuzztime=5s ./nex
           go test -run=^$ -fuzz=^FuzzProtocolApply$ -fuzztime=5s ./nex
           go test -run=^$ -fuzz=^FuzzVerifySealedSettlement$ -fuzztime=5s ./internal/nexum

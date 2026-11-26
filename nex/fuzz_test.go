@@ -1266,3 +1266,684 @@ func FuzzProtocolApply(f *testing.F) {
 		}
 	})
 }
+
+func fuzzBuildSealedAccordSeeds(tb testing.TB) ([]AccordBundle, map[[2]string]string) {
+	tb.Helper()
+	safety := fuzzNewActor(tb)
+	sre := fuzzNewActor(tb)
+	auditor := fuzzNewActor(tb)
+	tally := fuzzNewActor(tb)
+
+	// 1024-bit is the minimum modulus accepted by he.FromPublic and exercises
+	// identical CDS94 OR-proof and GMR VerifyEqual paths ~8x faster for fuzzing.
+	tallyKey, err := NewSealedTallyKey(1024)
+	if err != nil {
+		tb.Fatalf("NewSealedTallyKey: %v", err)
+	}
+
+	makeSpec := func(nonce string, mode BallotMode, minPartCount, minPartWeight uint64, singleOption bool) AccordSpec {
+		opts := []AccordOption{
+			{
+				ID: "canary-rollout", Title: "Canary rollout", Priority: 1,
+				Binding: OptionBinding{
+					Kind:           BindingDisposition,
+					Disposition:    "continue",
+					ActionHash:     Hash("canary-act:" + nonce),
+					ParametersHash: Hash("canary-params:" + nonce),
+				},
+			},
+		}
+		if !singleOption {
+			opts = append(opts, AccordOption{
+				ID: "hold-and-remediate", Title: "Hold and remediate", Priority: 2,
+				Binding: OptionBinding{
+					Kind:           BindingDisposition,
+					Disposition:    "hold",
+					ActionHash:     Hash("hold-act:" + nonce),
+					ParametersHash: Hash("hold-params:" + nonce),
+				},
+			})
+		}
+		return AccordSpec{
+			Version:      AccordVersion,
+			Nonce:        nonce,
+			Purpose:      "Sealed fuzz accord " + nonce,
+			Scope:        "fuzz/sealed",
+			PolicyHash:   Hash("policy:" + nonce),
+			Participants: []Public{safety.pub, sre.pub, auditor.pub, tally.pub},
+			Roles: []AccordRoleGrant{
+				{
+					ID: "safety-vote", Actor: safety.pub.ID(), Scope: "fuzz/sealed",
+					DomainRoles: []string{"safety"},
+					Permissions: []AccordPermission{AccordPermitVote},
+					Weight:      2, ExpiresAtHeight: 15, LimitsHash: Hash("safety-lim"),
+				},
+				{
+					ID: "sre-vote", Actor: sre.pub.ID(), Scope: "fuzz/sealed",
+					DomainRoles: []string{"sre"},
+					Permissions: []AccordPermission{AccordPermitVote},
+					Weight:      1, ExpiresAtHeight: 15, LimitsHash: Hash("sre-lim"),
+				},
+				{
+					ID: "auditor-veto", Actor: auditor.pub.ID(), Scope: "fuzz/sealed",
+					DomainRoles:     []string{"auditor"},
+					Permissions:     []AccordPermission{AccordPermitVeto},
+					ExpiresAtHeight: 15, LimitsHash: Hash("auditor-lim"),
+				},
+				{
+					ID: "tally-resolve", Actor: tally.pub.ID(), Scope: "fuzz/sealed",
+					Permissions:     []AccordPermission{AccordPermitResolve},
+					ExpiresAtHeight: 20, LimitsHash: Hash("tally-lim"),
+				},
+			},
+			Options:         opts,
+			VoteByHeight:    10,
+			ResolveByHeight: 20,
+			Rules: DecisionRules{
+				BallotMode:                 mode,
+				BallotPrivacy:              BallotPrivacySealedPaillier,
+				MinParticipationCount:      minPartCount,
+				MinParticipationWeight:     minPartWeight,
+				MinApprovalCount:           1,
+				MinApprovalWeight:          2,
+				MandatoryRoles:             []RoleRequirement{{Role: "safety", MinApprovals: 1, MinWeight: 2}},
+				Veto:                       VetoPolicy{Mode: VetoBlocking, MaxVetoesPerActor: 1, AllowedDomainRoles: []string{"auditor"}},
+				TieBreak:                   TieBreakLowestPriority,
+				RequireIndependentResolver: true,
+			},
+			SealedTally: &SealedTallyConfig{
+				PublicKey:      tallyKey.PublicKey(),
+				TallyAuthority: tally.pub.ID(),
+			},
+			MaxEvents: 32,
+		}
+	}
+
+	castSealed := func(a *Accord, actor fuzzActor, grant, reqID string, height uint64, choices map[string]BallotPosition) {
+		b := a.Bundle()
+		sb, err := EncryptSealedBallot(b.Spec, a.View().ID, actor.pub.ID(), choices, Hash("rat:"+reqID))
+		if err != nil {
+			tb.Fatalf("EncryptSealedBallot(%s): %v", reqID, err)
+		}
+		fuzzAccordApply(tb, a, actor, grant, "vote", reqID, height, func(c *AccordCommand) {
+			c.Vote = &VotePayload{Sealed: sb}
+		})
+	}
+
+	resolveSealed := func(a *Accord, reqID string, height uint64) {
+		proof, err := tallyKey.TallyAccord(a.Bundle())
+		if err != nil {
+			tb.Fatalf("TallyAccord(%s): %v", reqID, err)
+		}
+		fuzzAccordApply(tb, a, tally, "tally-resolve", "resolve", reqID, height, func(c *AccordCommand) {
+			c.Resolve = &ResolvePayload{ReasonHash: Hash("res:" + reqID), SealedTally: proof}
+		})
+	}
+
+	// 1. Decided sealed single-choice Accord with mandatory safety role + veto + dissent.
+	aSingle, err := NewAccord(makeSpec("fuzz-sealed-single", BallotSingleChoice, 2, 3, false))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	fuzzAccordApply(tb, aSingle, auditor, "auditor-veto", "veto", "veto-hold", 2, func(c *AccordCommand) {
+		c.Veto = &VetoPayload{OptionID: "hold-and-remediate", ReasonHash: Hash("veto-hold")}
+	})
+	castSealed(aSingle, safety, "safety-vote", "v-saf", 3, map[string]BallotPosition{
+		"canary-rollout":     BallotApprove,
+		"hold-and-remediate": BallotDissent,
+	})
+	castSealed(aSingle, sre, "sre-vote", "v-sre", 4, map[string]BallotPosition{
+		"canary-rollout":     BallotDissent,
+		"hold-and-remediate": BallotApprove,
+	})
+	resolveSealed(aSingle, "res-single", 10)
+
+	// 2. Decided sealed approval Accord (exercises BallotApproval path without SingleChoiceProof).
+	aApproval, err := NewAccord(makeSpec("fuzz-sealed-approval", BallotApproval, 1, 2, true))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	castSealed(aApproval, safety, "safety-vote", "v-saf-app", 2, map[string]BallotPosition{
+		"canary-rollout": BallotApprove,
+	})
+	resolveSealed(aApproval, "res-approval", 10)
+
+	// 3. Deadlocked sealed Accord (below quorum).
+	aDeadlock, err := NewAccord(makeSpec("fuzz-sealed-deadlock", BallotSingleChoice, 2, 3, true))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	castSealed(aDeadlock, sre, "sre-vote", "v-sre-dl", 2, map[string]BallotPosition{
+		"canary-rollout": BallotAbstain,
+	})
+	resolveSealed(aDeadlock, "res-deadlock", 10)
+
+	// 4. Open sealed Accord (1 encrypted ballot, unresolved).
+	aOpen, err := NewAccord(makeSpec("fuzz-sealed-open", BallotSingleChoice, 2, 3, true))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	castSealed(aOpen, safety, "safety-vote", "v-saf-open", 2, map[string]BallotPosition{
+		"canary-rollout": BallotApprove,
+	})
+
+	// 5. Expired sealed Accord.
+	aExpired, err := NewAccord(makeSpec("fuzz-sealed-expired", BallotSingleChoice, 2, 3, true))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	fuzzAccordApply(tb, aExpired, tally, "tally-resolve", "expire", "exp-sealed", 20, func(c *AccordCommand) {
+		c.Expire = &ExpirePayload{ReasonHash: Hash("expired-sealed")}
+	})
+
+	bundles := []AccordBundle{
+		aSingle.Bundle(),
+		aApproval.Bundle(),
+		aDeadlock.Bundle(),
+		aOpen.Bundle(),
+		aExpired.Bundle(),
+	}
+	seedViews := make(map[[2]string]string, len(bundles))
+	for _, b := range bundles {
+		id := b.Spec.ID()
+		head := id
+		if len(b.Events) > 0 {
+			head = b.Events[len(b.Events)-1].ReceiptHash
+		}
+		v, err := VerifyAccordBundle(b, id, head)
+		if err != nil {
+			tb.Fatalf("seed sealed AccordBundle %s failed verification: %v", b.Spec.Nonce, err)
+		}
+		if len(v.Votes) != 0 {
+			tb.Fatalf("seed sealed AccordBundle %s exposed plaintext votes", b.Spec.Nonce)
+		}
+		seedViews[[2]string{id, head}] = Hash(v)
+	}
+	return bundles, seedViews
+}
+
+func FuzzVerifySealedAccordBundle(f *testing.F) {
+	bundles, seedViewHashes := fuzzBuildSealedAccordSeeds(f)
+
+	for _, b := range bundles {
+		raw, err := json.Marshal(b)
+		if err != nil {
+			f.Fatal(err)
+		}
+		id := b.Spec.ID()
+		head := id
+		if len(b.Events) > 0 {
+			head = b.Events[len(b.Events)-1].ReceiptHash
+		}
+		f.Add(raw, id, head)
+	}
+
+	// Targeted adversarial mutations on the decided single-choice sealed bundle.
+	decided := bundles[0]
+	decidedID := decided.Spec.ID()
+	decidedHead := decided.Events[len(decided.Events)-1].ReceiptHash
+	addMutated := func(mutate func(*AccordBundle)) {
+		b := AccordBundle{Spec: cloneAccordSpec(decided.Spec), Events: cloneAccordEvents(decided.Events)}
+		mutate(&b)
+		if raw, err := json.Marshal(b); err == nil {
+			f.Add(raw, decidedID, decidedHead)
+		}
+	}
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Vote != nil && b.Events[i].Command.Vote.Sealed != nil {
+				b.Events[i].Command.Vote.Sealed.Options[0].ApproveCT[0] ^= 0xff
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Vote != nil && b.Events[i].Command.Vote.Sealed != nil {
+				b.Events[i].Command.Vote.Sealed.Options[0].ApproveProof[0] ^= 0xff
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Vote != nil && b.Events[i].Command.Vote.Sealed != nil {
+				b.Events[i].Command.Vote.Sealed.SingleChoiceProof = nil
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Resolve != nil && b.Events[i].Command.Resolve.SealedTally != nil {
+				b.Events[i].Command.Resolve.SealedTally.Options[0].ApproveCount++
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Resolve != nil && b.Events[i].Command.Resolve.SealedTally != nil {
+				b.Events[i].Command.Resolve.SealedTally.Options[0].ApproveCountProof[0] ^= 0xff
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		for i := range b.Events {
+			if b.Events[i].Command.Resolve != nil && b.Events[i].Command.Resolve.SealedTally != nil {
+				b.Events[i].Command.Resolve.SealedTally.Options[0].RoleTallies[0].ApproveWeightProof[0] ^= 0xff
+				break
+			}
+		}
+	})
+	addMutated(func(b *AccordBundle) {
+		b.Spec.SealedTally.PublicKey = append([]byte{0x00}, b.Spec.SealedTally.PublicKey...)
+	})
+
+	f.Add([]byte(`{`), decidedID, decidedHead)
+	f.Add([]byte(`{}`), decidedID, decidedHead)
+	f.Add([]byte(`null`), "", "")
+	f.Add([]byte(`{"spec":{"version":1,"sealed_tally":{"tally_authority":"bad\u0000id"}}}`), decidedID, decidedHead)
+	f.Add([]byte(`[]`), "not-hex", "not-hex")
+
+	checkAccepted := func(t *testing.T, bundle AccordBundle, id, head string, view AccordView) {
+		t.Helper()
+		if view.ID != id || view.Head != head {
+			t.Fatalf("verified sealed view pins mismatch: got (%s,%s), want (%s,%s)", view.ID, view.Head, id, head)
+		}
+		if err := bundle.Spec.Validate(); err != nil {
+			t.Fatalf("verified sealed bundle has invalid spec: %v", err)
+		}
+		if bundle.Spec.Rules.BallotPrivacy == BallotPrivacySealedPaillier {
+			if bundle.Spec.SealedTally == nil {
+				t.Fatal("verified sealed bundle missing SealedTally config")
+			}
+			if len(view.Votes) != 0 {
+				t.Fatalf("verified sealed bundle exposed %d plaintext votes", len(view.Votes))
+			}
+		}
+		view2, err := VerifyAccordBundle(bundle, id, head)
+		if err != nil || Hash(view) != Hash(view2) {
+			t.Fatalf("non-deterministic sealed verification: %v", err)
+		}
+		if wantHash, ok := seedViewHashes[[2]string{id, head}]; ok && Hash(view) != wantHash {
+			t.Fatalf("mutated sealed bundle verified with original seed pins (%s,%s)", id, head)
+		}
+
+		// Fail-closed checks on mutated pins, sealed ciphertexts, OR-proofs, and GMR tally proofs.
+		if _, err := VerifyAccordBundle(bundle, fuzzFlipHex(id), head); err == nil {
+			t.Fatal("VerifyAccordBundle accepted mutated expectedAccordID")
+		}
+		if _, err := VerifyAccordBundle(bundle, id, fuzzFlipHex(head)); err == nil {
+			t.Fatal("VerifyAccordBundle accepted mutated expectedHead")
+		}
+		if len(bundle.Events) > 0 {
+			mutSig := AccordBundle{Spec: cloneAccordSpec(bundle.Spec), Events: cloneAccordEvents(bundle.Events)}
+			mutSig.Events[0].Signature[0] ^= 0x01
+			if _, err := VerifyAccordBundle(mutSig, id, head); err == nil {
+				t.Fatal("VerifyAccordBundle accepted flipped signature bit")
+			}
+			for i, ev := range bundle.Events {
+				if ev.Command.Vote != nil && ev.Command.Vote.Sealed != nil && len(ev.Command.Vote.Sealed.Options) > 0 {
+					mutCT := AccordBundle{Spec: cloneAccordSpec(bundle.Spec), Events: cloneAccordEvents(bundle.Events)}
+					if len(mutCT.Events[i].Command.Vote.Sealed.Options[0].ApproveCT) > 0 {
+						mutCT.Events[i].Command.Vote.Sealed.Options[0].ApproveCT[0] ^= 0x01
+						if _, err := VerifyAccordBundle(mutCT, id, head); err == nil {
+							t.Fatal("VerifyAccordBundle accepted mutated sealed ApproveCT")
+						}
+					}
+					break
+				}
+			}
+			for i, ev := range bundle.Events {
+				if ev.Command.Resolve != nil && ev.Command.Resolve.SealedTally != nil && len(ev.Command.Resolve.SealedTally.Options) > 0 {
+					mutProof := AccordBundle{Spec: cloneAccordSpec(bundle.Spec), Events: cloneAccordEvents(bundle.Events)}
+					if len(mutProof.Events[i].Command.Resolve.SealedTally.Options[0].ApproveCountProof) > 0 {
+						mutProof.Events[i].Command.Resolve.SealedTally.Options[0].ApproveCountProof[0] ^= 0x01
+						if _, err := VerifyAccordBundle(mutProof, id, head); err == nil {
+							t.Fatal("VerifyAccordBundle accepted mutated SealedTally ApproveCountProof")
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, raw []byte, expectedID, expectedHead string) {
+		var bundle AccordBundle
+		if err := json.Unmarshal(raw, &bundle); err != nil {
+			if _, vErr := VerifyAccordBundle(AccordBundle{}, expectedID, expectedHead); vErr == nil {
+				t.Fatal("VerifyAccordBundle accepted zero bundle")
+			}
+			return
+		}
+		if view, err := VerifyAccordBundle(bundle, expectedID, expectedHead); err == nil {
+			checkAccepted(t, bundle, expectedID, expectedHead, view)
+		}
+		if bundle.Spec.Validate() == nil {
+			derivedID := bundle.Spec.ID()
+			derivedHead := derivedID
+			if len(bundle.Events) > 0 {
+				derivedHead = bundle.Events[len(bundle.Events)-1].ReceiptHash
+			}
+			if derivedID != expectedID || derivedHead != expectedHead {
+				if view, err := VerifyAccordBundle(bundle, derivedID, derivedHead); err == nil {
+					checkAccepted(t, bundle, derivedID, derivedHead, view)
+				}
+			}
+		}
+	})
+}
+
+func fuzzBuildGoalPlanWithGatesSeeds(tb testing.TB) ([]GoalPlan, map[[2]string]string) {
+	tb.Helper()
+	planner := fuzzNewActor(tb)
+	authority := fuzzNewActor(tb)
+
+	makePlan := func(nonce string, build func(goalID string, apply func(head, reqID string, gates []AccordGate, tasks ...TaskSpec) string)) GoalPlan {
+		dir := filepath.Join(tb.TempDir(), nonce)
+		key := bytes.Repeat([]byte{0x6b}, 32)
+		goals, err := OpenGoalStore(dir, key)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		goalID, err := goals.Create(GoalSpec{
+			Nonce:                nonce,
+			Purpose:              "Fuzz goal plan with gates " + nonce,
+			ConstraintsHash:      Hash("constraints:" + nonce),
+			CompletionPolicyHash: Hash("completion:" + nonce),
+			Planners:             []Public{planner.pub},
+		})
+		if err != nil {
+			tb.Fatal(err)
+		}
+		apply := func(head, reqID string, gates []AccordGate, tasks ...TaskSpec) string {
+			rev := PlanRevision{
+				GoalID:    goalID,
+				Head:      head,
+				Planner:   planner.pub.ID(),
+				RequestID: reqID,
+				Gates:     gates,
+				Tasks:     tasks,
+			}
+			nextHead, err := goals.Apply(rev, Sign(planner.id, PlanSignatureDomain, rev))
+			if err != nil {
+				tb.Fatalf("goals.Apply(%s/%s): %v", nonce, reqID, err)
+			}
+			return nextHead
+		}
+		if build != nil {
+			build(goalID, apply)
+		}
+		plan, err := goals.View(goalID)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		return plan
+	}
+
+	makeTask := func(goalID, nonce string, deps []TaskDependency, gateDeps ...TaskGateDependency) TaskSpec {
+		return TaskSpec{
+			GoalID:            goalID,
+			Nonce:             nonce,
+			Purpose:           "Task " + nonce,
+			Scope:             "fuzz/" + nonce,
+			SpecificationHash: Hash("spec:" + nonce),
+			AcceptanceHash:    Hash("acc:" + nonce),
+			FailurePolicyHash: Hash("fail:" + nonce),
+			Authority:         authority.pub,
+			Outputs:           []string{"out"},
+			FailureOutputs:    []string{"diag"},
+			Dependencies:      deps,
+			GateDependencies:  gateDeps,
+		}
+	}
+
+	// 1. Rich multi-revision conditional DAG covering all 3 terminal RequiredPhase values,
+	// ExpectedCommitment, ExpectedDeadlockReason, AllowedOptions, and multi-gate fan-in.
+	richPlan := makePlan("fuzz-gates-rich", func(goalID string, apply func(string, string, []AccordGate, ...TaskSpec) string) {
+		upPatch := makeTask(goalID, "up-patch", nil)
+		upSafety := makeTask(goalID, "up-safety", nil)
+		h1 := apply(goalID, "rev-1", nil, upPatch, upSafety)
+
+		releaseGate := AccordGate{
+			ID:             "release-gate",
+			GoalID:         goalID,
+			AccordID:       Hash("accord-release"),
+			Purpose:        "Select rollout strategy",
+			AllowedOptions: []string{"full-rollout", "canary-rollout", "hold-and-remediate"},
+		}
+		canaryTask := makeTask(
+			goalID, "canary-task",
+			[]TaskDependency{
+				{Input: "patch", TaskID: upPatch.ID(), ProtocolID: Hash("p1"), Head: Hash("h1"), Slot: "out", Digest: Hash("d1"), Outcome: TaskAccepted},
+				{Input: "safety", TaskID: upSafety.ID(), ProtocolID: Hash("p2"), Head: Hash("h2"), Slot: "out", Digest: Hash("d2"), Outcome: TaskIncomplete},
+			},
+			TaskGateDependency{
+				GateID:             "release-gate",
+				RequiredPhase:      AccordPhaseDecided,
+				OptionID:           "canary-rollout",
+				ExpectedCommitment: Hash("canary-binding"),
+			},
+		)
+		deadlockTask := makeTask(
+			goalID, "deadlock-task", nil,
+			TaskGateDependency{
+				GateID:                 "release-gate",
+				RequiredPhase:          AccordPhaseDeadlocked,
+				ExpectedDeadlockReason: DeadlockNoQuorum,
+			},
+		)
+		expiredTask := makeTask(
+			goalID, "expired-task", nil,
+			TaskGateDependency{
+				GateID:        "release-gate",
+				RequiredPhase: AccordPhaseExpired,
+			},
+		)
+		h2 := apply(h1, "rev-2", []AccordGate{releaseGate}, canaryTask, deadlockTask, expiredTask)
+
+		auditGate := AccordGate{
+			ID:       "audit-gate",
+			GoalID:   goalID,
+			AccordID: Hash("accord-audit"),
+			Purpose:  "Secondary unrestricted audit gate",
+		}
+		dualGateTask := makeTask(
+			goalID, "dual-gate-task", nil,
+			TaskGateDependency{GateID: "release-gate", RequiredPhase: AccordPhaseDecided, OptionID: "full-rollout"},
+			TaskGateDependency{GateID: "audit-gate", RequiredPhase: AccordPhaseDecided, OptionID: "audit-pass"},
+		)
+		apply(h2, "rev-3", []AccordGate{auditGate}, dualGateTask)
+	})
+
+	// 2. Gate-only revision followed by a task revision referencing the prior-revision gate.
+	gateOnlyPlan := makePlan("fuzz-gates-only-rev", func(goalID string, apply func(string, string, []AccordGate, ...TaskSpec) string) {
+		g := AccordGate{
+			ID:             "policy-gate",
+			GoalID:         goalID,
+			AccordID:       Hash("accord-policy"),
+			Purpose:        "Declare gate before tasks",
+			AllowedOptions: []string{"approve"},
+		}
+		h1 := apply(goalID, "rev-gate-only", []AccordGate{g})
+		t1 := makeTask(goalID, "gated-after", nil, TaskGateDependency{
+			GateID:        "policy-gate",
+			RequiredPhase: AccordPhaseDecided,
+			OptionID:      "approve",
+		})
+		apply(h1, "rev-task", nil, t1)
+	})
+
+	// 3. Genesis plan (0 revisions).
+	genesisPlan := makePlan("fuzz-gates-genesis", nil)
+
+	plans := []GoalPlan{richPlan, gateOnlyPlan, genesisPlan}
+	seedHashes := make(map[[2]string]string, len(plans))
+	for _, p := range plans {
+		gid := p.Spec.ID()
+		if err := VerifyGoalPlan(p, gid, p.Head); err != nil {
+			tb.Fatalf("seed GoalPlan %s failed verification: %v", p.Spec.Nonce, err)
+		}
+		seedHashes[[2]string{gid, p.Head}] = Hash(p)
+	}
+	return plans, seedHashes
+}
+
+func FuzzVerifyGoalPlanWithGates(f *testing.F) {
+	plans, seedPlanHashes := fuzzBuildGoalPlanWithGatesSeeds(f)
+
+	for _, p := range plans {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(raw, p.Spec.ID(), p.Head)
+	}
+
+	// Targeted adversarial mutations on richPlan.
+	rich := plans[0]
+	richGoalID := rich.Spec.ID()
+	richHead := rich.Head
+	addMutated := func(mutate func(*GoalPlan)) {
+		rawBase, err := json.Marshal(rich)
+		if err != nil {
+			f.Fatal(err)
+		}
+		var clone GoalPlan
+		if err := json.Unmarshal(rawBase, &clone); err != nil {
+			f.Fatal(err)
+		}
+		mutate(&clone)
+		if raw, err := json.Marshal(clone); err == nil {
+			f.Add(raw, richGoalID, richHead)
+		}
+	}
+	addMutated(func(p *GoalPlan) { p.Revisions[1].Signature[0] ^= 0xff })
+	addMutated(func(p *GoalPlan) { p.Revisions = p.Revisions[:len(p.Revisions)-1] })
+	addMutated(func(p *GoalPlan) {
+		p.Revisions[1].Revision.Gates[0].AccordID = fuzzFlipHex(p.Revisions[1].Revision.Gates[0].AccordID)
+	})
+	addMutated(func(p *GoalPlan) { p.Revisions[1].Revision.Gates[0].ID = "bad\x00gate" })
+	addMutated(func(p *GoalPlan) {
+		p.Revisions[1].Revision.Tasks[0].GateDependencies[0].RequiredPhase = AccordPhaseOpen
+	})
+	addMutated(func(p *GoalPlan) { p.Revisions[1].Revision.Tasks[0].GateDependencies[0].OptionID = "disallowed-opt" })
+	addMutated(func(p *GoalPlan) { p.Revisions[1].Revision.Tasks[0].GateDependencies[0].GateID = "missing-gate" })
+	addMutated(func(p *GoalPlan) {
+		p.Revisions[1].Revision.Tasks[1].GateDependencies[0].OptionID = "forbidden-on-deadlock"
+	})
+	addMutated(func(p *GoalPlan) {
+		p.Revisions[1].Revision.Tasks[2].GateDependencies[0].ExpectedCommitment = Hash("forbidden-on-expired")
+	})
+	addMutated(func(p *GoalPlan) { p.Revisions[2].Revision.Gates[0].ID = "release-gate" })
+
+	f.Add([]byte(`{`), richGoalID, richHead)
+	f.Add([]byte(`{}`), richGoalID, richHead)
+	f.Add([]byte(`null`), "", "")
+	f.Add([]byte(`[]`), "not-hex", "not-hex")
+
+	checkAccepted := func(t *testing.T, plan GoalPlan, goalID, head string) {
+		t.Helper()
+		if plan.Spec.ID() != goalID || plan.Head != head {
+			t.Fatalf("verified GoalPlan pin mismatch: got (%s,%s), want (%s,%s)", plan.Spec.ID(), plan.Head, goalID, head)
+		}
+		if err := VerifyGoalPlan(plan, goalID, head); err != nil {
+			t.Fatalf("non-deterministic VerifyGoalPlan: %v", err)
+		}
+		if wantHash, ok := seedPlanHashes[[2]string{goalID, head}]; ok && Hash(plan) != wantHash {
+			t.Fatalf("mutated GoalPlan verified under original seed pins (%s,%s)", goalID, head)
+		}
+
+		// Verify gate and task-gate invariants across all accepted revisions.
+		declaredGates := make(map[string]AccordGate)
+		for _, signed := range plan.Revisions {
+			if len(signed.Revision.Tasks) == 0 && len(signed.Revision.Gates) == 0 {
+				t.Fatal("verified GoalPlan contained empty revision")
+			}
+			for _, g := range signed.Revision.Gates {
+				if err := g.validate(goalID); err != nil {
+					t.Fatalf("verified GoalPlan has invalid gate %q: %v", g.ID, err)
+				}
+				if _, dup := declaredGates[g.ID]; dup {
+					t.Fatalf("verified GoalPlan has duplicate gate %q", g.ID)
+				}
+				declaredGates[g.ID] = g
+			}
+			for _, task := range signed.Revision.Tasks {
+				if err := task.validate(goalID); err != nil {
+					t.Fatalf("verified GoalPlan has invalid task %q: %v", task.Nonce, err)
+				}
+				for _, gd := range task.GateDependencies {
+					g, ok := declaredGates[gd.GateID]
+					if !ok {
+						t.Fatalf("verified GoalPlan task %q references undeclared gate %q", task.Nonce, gd.GateID)
+					}
+					if !isTerminalAccordPhase(gd.RequiredPhase) {
+						t.Fatalf("verified GoalPlan task %q has non-terminal gate phase %q", task.Nonce, gd.RequiredPhase)
+					}
+					if gd.RequiredPhase == AccordPhaseDecided && len(g.AllowedOptions) > 0 && !slices.Contains(g.AllowedOptions, gd.OptionID) {
+						t.Fatalf("verified GoalPlan task %q option %q outside AllowedOptions %v", task.Nonce, gd.OptionID, g.AllowedOptions)
+					}
+				}
+			}
+		}
+
+		// Fail-closed checks on mutated pins and plan fields.
+		if err := VerifyGoalPlan(plan, fuzzFlipHex(goalID), head); err == nil {
+			t.Fatal("VerifyGoalPlan accepted mutated expectedGoalID")
+		}
+		if err := VerifyGoalPlan(plan, goalID, fuzzFlipHex(head)); err == nil {
+			t.Fatal("VerifyGoalPlan accepted mutated expectedHead")
+		}
+		mutSpec := plan
+		mutSpec.Spec.Purpose += "-mut"
+		if err := VerifyGoalPlan(mutSpec, goalID, head); err == nil {
+			t.Fatal("VerifyGoalPlan accepted mutated Spec.Purpose")
+		}
+		if len(plan.Revisions) > 0 {
+			rawCopy, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mutSig GoalPlan
+			if err := json.Unmarshal(rawCopy, &mutSig); err != nil {
+				t.Fatal(err)
+			}
+			mutSig.Revisions[0].Signature[0] ^= 0x01
+			if err := VerifyGoalPlan(mutSig, goalID, head); err == nil {
+				t.Fatal("VerifyGoalPlan accepted flipped revision signature bit")
+			}
+
+			mutTrunc := plan
+			mutTrunc.Revisions = plan.Revisions[:len(plan.Revisions)-1]
+			if err := VerifyGoalPlan(mutTrunc, goalID, head); err == nil {
+				t.Fatal("VerifyGoalPlan accepted truncated revision list")
+			}
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, raw []byte, expectedGoalID, expectedHead string) {
+		var plan GoalPlan
+		if err := json.Unmarshal(raw, &plan); err != nil {
+			if vErr := VerifyGoalPlan(GoalPlan{}, expectedGoalID, expectedHead); vErr == nil {
+				t.Fatal("VerifyGoalPlan accepted zero GoalPlan")
+			}
+			return
+		}
+		if err := VerifyGoalPlan(plan, expectedGoalID, expectedHead); err == nil {
+			checkAccepted(t, plan, expectedGoalID, expectedHead)
+		}
+		if plan.Spec.validate() == nil {
+			derivedGoalID := plan.Spec.ID()
+			derivedHead := plan.Head
+			if derivedGoalID != expectedGoalID || derivedHead != expectedHead {
+				if err := VerifyGoalPlan(plan, derivedGoalID, derivedHead); err == nil {
+					checkAccepted(t, plan, derivedGoalID, derivedHead)
+				}
+			}
+		}
+	})
+}
