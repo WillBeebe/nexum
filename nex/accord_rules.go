@@ -13,6 +13,15 @@ const (
 	BallotApproval     BallotMode = "approval"
 )
 
+// BallotPrivacy controls whether voter ballots are recorded as public
+// plaintext votes or Paillier-sealed ciphertexts with zero-knowledge proofs.
+type BallotPrivacy string
+
+const (
+	BallotPrivacyPublic         BallotPrivacy = "public"
+	BallotPrivacySealedPaillier BallotPrivacy = "sealed_paillier"
+)
+
 // BallotPosition is a participant's explicit stance on one option.
 type BallotPosition string
 
@@ -75,6 +84,7 @@ type VetoPolicy struct {
 // margin, mandatory domain roles, bounded veto policy, and tie-breaking.
 type DecisionRules struct {
 	BallotMode                 BallotMode        `json:"ballot_mode"`
+	BallotPrivacy              BallotPrivacy     `json:"ballot_privacy,omitempty"`
 	MinParticipationCount      uint64            `json:"min_participation_count,omitempty"`
 	MinParticipationWeight     uint64            `json:"min_participation_weight,omitempty"`
 	MinApprovalCount           uint64            `json:"min_approval_count"`
@@ -192,6 +202,11 @@ func validateRoleRequirements(reqs []RoleRequirement, roleVoterCount, roleVoterW
 func validateDecisionRules(r DecisionRules, voterCount, totalWeight uint64, roleVoterCount, roleVoterWeight map[string]uint64) error {
 	switch r.BallotMode {
 	case BallotSingleChoice, BallotApproval:
+	default:
+		return ErrAccordSpec
+	}
+	switch r.BallotPrivacy {
+	case "", BallotPrivacyPublic, BallotPrivacySealedPaillier:
 	default:
 		return ErrAccordSpec
 	}
@@ -323,56 +338,59 @@ func buildOptionTallies(spec AccordSpec, view AccordView) ([]OptionTally, map[st
 		}
 		slices.Sort(tally.MissingRoles)
 
-		optVetoes := vetoesByOption[opt.ID]
-		if len(optVetoes) > 0 {
-			tally.Vetoed = true
-			tally.Vetoers = make([]string, len(optVetoes))
-			for j, vt := range optVetoes {
-				tally.Vetoers[j] = vt.Actor
-			}
-			slices.Sort(tally.Vetoers)
-			switch rules.Veto.Mode {
-			case VetoBlocking:
-				tally.VetoEffective = true
-			case VetoOverridable:
-				tally.VetoOverridden = tally.ApproveWeight >= rules.Veto.OverrideWeight
-				tally.VetoEffective = !tally.VetoOverridden
-			}
-		}
-
-		marginOK := tally.ApproveWeight >= tally.DissentWeight &&
-			tally.ApproveWeight-tally.DissentWeight >= rules.MinApprovalMarginWeight
-		countOK := tally.ApproveCount >= rules.MinApprovalCount
-		weightOK := tally.ApproveWeight >= rules.MinApprovalWeight
-		rolesOK := len(tally.MissingRoles) == 0
-
-		// Fixed canonical DisqualificationReasons order.
-		if !tally.GuardPassed {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "guard_failed")
-		}
-		if tally.VetoEffective {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "vetoed")
-		}
-		if !countOK {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_count")
-		}
-		if !weightOK {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_weight")
-		}
-		if !marginOK {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_margin")
-		}
-		if !rolesOK {
-			tally.DisqualificationReasons = append(tally.DisqualificationReasons, "missing_mandatory_role")
-		}
-
-		nonVetoOK := tally.GuardPassed && countOK && weightOK && marginOK && rolesOK
+		tally, nonVetoOK := finalizeOptionTally(tally, vetoesByOption[opt.ID], rules)
 		passedWithoutVeto[opt.ID] = nonVetoOK
-		tally.Eligible = nonVetoOK && !tally.VetoEffective
-
 		tallies[i] = tally
 	}
 	return tallies, passedWithoutVeto
+}
+
+func finalizeOptionTally(tally OptionTally, optVetoes []RecordedVeto, rules DecisionRules) (OptionTally, bool) {
+	if len(optVetoes) > 0 {
+		tally.Vetoed = true
+		tally.Vetoers = make([]string, len(optVetoes))
+		for j, vt := range optVetoes {
+			tally.Vetoers[j] = vt.Actor
+		}
+		slices.Sort(tally.Vetoers)
+		switch rules.Veto.Mode {
+		case VetoBlocking:
+			tally.VetoEffective = true
+		case VetoOverridable:
+			tally.VetoOverridden = tally.ApproveWeight >= rules.Veto.OverrideWeight
+			tally.VetoEffective = !tally.VetoOverridden
+		}
+	}
+
+	marginOK := tally.ApproveWeight >= tally.DissentWeight &&
+		tally.ApproveWeight-tally.DissentWeight >= rules.MinApprovalMarginWeight
+	countOK := tally.ApproveCount >= rules.MinApprovalCount
+	weightOK := tally.ApproveWeight >= rules.MinApprovalWeight
+	rolesOK := len(tally.MissingRoles) == 0
+
+	// Fixed canonical DisqualificationReasons order.
+	if !tally.GuardPassed {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "guard_failed")
+	}
+	if tally.VetoEffective {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "vetoed")
+	}
+	if !countOK {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_count")
+	}
+	if !weightOK {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_weight")
+	}
+	if !marginOK {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "below_approval_margin")
+	}
+	if !rolesOK {
+		tally.DisqualificationReasons = append(tally.DisqualificationReasons, "missing_mandatory_role")
+	}
+
+	nonVetoOK := tally.GuardPassed && countOK && weightOK && marginOK && rolesOK
+	tally.Eligible = nonVetoOK && !tally.VetoEffective
+	return tally, nonVetoOK
 }
 
 func cloneEvidenceSummary(facts []VerifiedEvidenceFact) []VerifiedEvidenceFact {
@@ -388,8 +406,14 @@ func cloneEvidenceSummary(facts []VerifiedEvidenceFact) []VerifiedEvidenceFact {
 }
 
 func evaluateExpiredOutcome(spec AccordSpec, view AccordView, actor string, height uint64, reasonHash string) AccordOutcome {
-	partCount, partWeight := computeParticipation(view.Votes)
-	tallies, _ := buildOptionTallies(spec, view)
+	var partCount, partWeight uint64
+	var tallies []OptionTally
+	if spec.Rules.BallotPrivacy == BallotPrivacySealedPaillier {
+		partCount, partWeight = computeSealedParticipation(view.SealedBallots)
+	} else {
+		partCount, partWeight = computeParticipation(view.Votes)
+		tallies, _ = buildOptionTallies(spec, view)
+	}
 	return AccordOutcome{
 		Phase:               AccordPhaseExpired,
 		ParticipatingCount:  partCount,
@@ -406,7 +430,19 @@ func evaluateExpiredOutcome(spec AccordSpec, view AccordView, actor string, heig
 func evaluateAccordOutcome(spec AccordSpec, view AccordView, actor string, height uint64, reasonHash string) AccordOutcome {
 	partCount, partWeight := computeParticipation(view.Votes)
 	tallies, passedWithoutVeto := buildOptionTallies(spec, view)
+	return evaluateAccordOutcomeFromTallies(spec, view, partCount, partWeight, tallies, passedWithoutVeto, actor, height, reasonHash)
+}
 
+func evaluateAccordOutcomeFromTallies(
+	spec AccordSpec,
+	view AccordView,
+	partCount, partWeight uint64,
+	tallies []OptionTally,
+	passedWithoutVeto map[string]bool,
+	actor string,
+	height uint64,
+	reasonHash string,
+) AccordOutcome {
 	outcome := AccordOutcome{
 		ParticipatingCount:  partCount,
 		ParticipatingWeight: partWeight,

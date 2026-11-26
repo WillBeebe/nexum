@@ -34,6 +34,7 @@ const (
 	maxAccordSpecBytes    = 256 << 10 // 256 KiB
 	maxAccordCommandBytes = 64 << 10  // 64 KiB (non-attest)
 	maxAttestCommandBytes = 512 << 10 // 512 KiB (attest)
+	maxSealedCommandBytes = 512 << 10 // 512 KiB (sealed vote/resolve)
 	maxAccordTotalWeight  = uint64(1) << 50
 	maxCachedAccords      = 256
 	accordStoreVersion    = 1
@@ -138,21 +139,22 @@ type AccordOption struct {
 // AccordSpec fixes the immutable participants, role grants, pinned evidence
 // slots, genesis options, height windows, and collective decision rules.
 type AccordSpec struct {
-	Version          int               `json:"version"`
-	Nonce            string            `json:"nonce"`
-	Purpose          string            `json:"purpose"`
-	Scope            string            `json:"scope"`
-	PolicyHash       string            `json:"policy_hash"`
-	Participants     []Public          `json:"participants"`
-	Roles            []AccordRoleGrant `json:"roles"`
-	Evidence         []EvidenceSlot    `json:"evidence,omitempty"`
-	Options          []AccordOption    `json:"options,omitempty"`
-	AllowProposals   bool              `json:"allow_proposals,omitempty"`
-	ProposalByHeight uint64            `json:"proposal_by_height,omitempty"`
-	VoteByHeight     uint64            `json:"vote_by_height"`
-	ResolveByHeight  uint64            `json:"resolve_by_height"`
-	Rules            DecisionRules     `json:"rules"`
-	MaxEvents        uint32            `json:"max_events"`
+	Version          int                `json:"version"`
+	Nonce            string             `json:"nonce"`
+	Purpose          string             `json:"purpose"`
+	Scope            string             `json:"scope"`
+	PolicyHash       string             `json:"policy_hash"`
+	Participants     []Public           `json:"participants"`
+	Roles            []AccordRoleGrant  `json:"roles"`
+	Evidence         []EvidenceSlot     `json:"evidence,omitempty"`
+	Options          []AccordOption     `json:"options,omitempty"`
+	AllowProposals   bool               `json:"allow_proposals,omitempty"`
+	ProposalByHeight uint64             `json:"proposal_by_height,omitempty"`
+	VoteByHeight     uint64             `json:"vote_by_height"`
+	ResolveByHeight  uint64             `json:"resolve_by_height"`
+	Rules            DecisionRules      `json:"rules"`
+	SealedTally      *SealedTallyConfig `json:"sealed_tally,omitempty"`
+	MaxEvents        uint32             `json:"max_events"`
 }
 
 // ID returns the domain-separated SHA-256 commitment for this specification.
@@ -327,6 +329,9 @@ func (s AccordSpec) Validate() error {
 	if err := validateDecisionRules(s.Rules, uint64(len(voters)), totalWeight, roleVoterCount, roleVoterWeight); err != nil {
 		return err
 	}
+	if err := validateSealedAccordSpec(s, parties, actorPerms); err != nil {
+		return err
+	}
 
 	optionIDs := make(map[string]bool, len(s.Options))
 	for _, opt := range s.Options {
@@ -353,11 +358,13 @@ type AttestPayload struct {
 	Protocol   *ProtocolBundle `json:"protocol,omitempty"`
 }
 
-// VotePayload records one participant's signed ballot on a candidate option.
+// VotePayload records one participant's signed ballot on a candidate option,
+// or a Paillier-sealed full ballot when BallotPrivacySealedPaillier is enabled.
 type VotePayload struct {
-	OptionID      string         `json:"option_id"`
-	Position      BallotPosition `json:"position"`
-	RationaleHash string         `json:"rationale_hash"`
+	OptionID      string               `json:"option_id"`
+	Position      BallotPosition       `json:"position"`
+	RationaleHash string               `json:"rationale_hash"`
+	Sealed        *SealedBallotPayload `json:"sealed,omitempty"`
 }
 
 // VetoPayload records one participant's signed bounded veto on an option.
@@ -369,7 +376,8 @@ type VetoPayload struct {
 
 // ResolvePayload triggers deterministic collective resolution at [VoteByHeight, ResolveByHeight).
 type ResolvePayload struct {
-	ReasonHash string `json:"reason_hash"`
+	ReasonHash  string            `json:"reason_hash"`
+	SealedTally *SealedTallyProof `json:"sealed_tally,omitempty"`
 }
 
 // ExpirePayload closes an unresolved Accord at height >= ResolveByHeight.
@@ -453,6 +461,7 @@ type AccordView struct {
 	Options          []RecordedOption       `json:"options,omitempty"`
 	Evidence         []VerifiedEvidenceFact `json:"evidence,omitempty"`
 	Votes            []RecordedVote         `json:"votes,omitempty"`
+	SealedBallots    []RecordedSealedBallot `json:"sealed_ballots,omitempty"`
 	Vetoes           []RecordedVeto         `json:"vetoes,omitempty"`
 	Outcome          *AccordOutcome         `json:"outcome,omitempty"`
 }
@@ -721,7 +730,16 @@ func (a *Accord) Apply(cmd AccordCommand, signature []byte, height uint64) (stri
 		if height < a.spec.ProposalByHeight || height >= a.spec.VoteByHeight {
 			return "", ErrAccordPhase
 		}
+		if a.spec.Rules.BallotPrivacy == BallotPrivacySealedPaillier {
+			if err := a.applySealedVote(&v, cmd, grant, height, receipt); err != nil {
+				return "", err
+			}
+			break
+		}
 		vp := cmd.Vote
+		if vp.Sealed != nil {
+			return "", ErrAccordSpec
+		}
 		if !validAccordID(vp.OptionID) || !allowedBallotPosition(vp.Position) || !protocolHash(vp.RationaleHash) {
 			return "", ErrAccordSpec
 		}
@@ -785,10 +803,12 @@ func (a *Accord) Apply(cmd AccordCommand, signature []byte, height uint64) (stri
 				return "", ErrAccordEquivocation
 			}
 		}
-		for _, existingVote := range v.Votes {
-			if existingVote.Actor == cmd.Actor && existingVote.OptionID == vp.OptionID &&
-				(existingVote.Position == BallotApprove || existingVote.Position == BallotAbstain) {
-				return "", ErrAccordEquivocation
+		if a.spec.Rules.BallotPrivacy != BallotPrivacySealedPaillier {
+			for _, existingVote := range v.Votes {
+				if existingVote.Actor == cmd.Actor && existingVote.OptionID == vp.OptionID &&
+					(existingVote.Position == BallotApprove || existingVote.Position == BallotAbstain) {
+					return "", ErrAccordEquivocation
+				}
 			}
 		}
 		var priorVetoes uint32
@@ -836,6 +856,18 @@ func (a *Accord) Apply(cmd AccordCommand, signature []byte, height uint64) (stri
 			return "", ErrAccordPhase
 		}
 		if !protocolHash(cmd.Resolve.ReasonHash) {
+			return "", ErrAccordSpec
+		}
+		if a.spec.Rules.BallotPrivacy == BallotPrivacySealedPaillier {
+			outcome, err := a.applySealedResolve(v, cmd, height)
+			if err != nil {
+				return "", err
+			}
+			v.Outcome = &outcome
+			v.Phase = outcome.Phase
+			break
+		}
+		if cmd.Resolve.SealedTally != nil {
 			return "", ErrAccordSpec
 		}
 		outcome := evaluateAccordOutcome(a.spec, v, cmd.Actor, height, cmd.Resolve.ReasonHash)
@@ -1122,8 +1154,17 @@ func checkAccordCommandSize(cmd AccordCommand) error {
 		return ErrAccordSpec
 	}
 	limit := maxAccordCommandBytes
-	if cmd.Action == "attest" {
+	switch cmd.Action {
+	case "attest":
 		limit = maxAttestCommandBytes
+	case "vote":
+		if cmd.Vote != nil && cmd.Vote.Sealed != nil {
+			limit = maxSealedCommandBytes
+		}
+	case "resolve":
+		if cmd.Resolve != nil && cmd.Resolve.SealedTally != nil {
+			limit = maxSealedCommandBytes
+		}
 	}
 	if len(raw) > limit {
 		return ErrAccordSpec
@@ -1323,7 +1364,11 @@ func validAccordSpecStrings(s AccordSpec) bool {
 			return false
 		}
 	}
-	if !validUTF8NoControl(string(s.Rules.BallotMode)) || !validUTF8NoControl(string(s.Rules.Veto.Mode)) || !validUTF8NoControl(string(s.Rules.TieBreak)) {
+	if !validUTF8NoControl(string(s.Rules.BallotMode)) || !validUTF8NoControl(string(s.Rules.BallotPrivacy)) ||
+		!validUTF8NoControl(string(s.Rules.Veto.Mode)) || !validUTF8NoControl(string(s.Rules.TieBreak)) {
+		return false
+	}
+	if !validSealedTallyConfigStrings(s.SealedTally) {
 		return false
 	}
 	for _, mr := range s.Rules.MandatoryRoles {
@@ -1417,6 +1462,9 @@ func validAccordCommandStrings(cmd AccordCommand) bool {
 		if !validUTF8NoControl(cmd.Vote.OptionID) || !validUTF8NoControl(string(cmd.Vote.Position)) || !validUTF8NoControl(cmd.Vote.RationaleHash) {
 			return false
 		}
+		if !validSealedBallotStrings(cmd.Vote.Sealed) {
+			return false
+		}
 	}
 	if cmd.Veto != nil {
 		if !validUTF8NoControl(cmd.Veto.OptionID) || !validUTF8NoControl(cmd.Veto.ReasonHash) {
@@ -1428,8 +1476,10 @@ func validAccordCommandStrings(cmd AccordCommand) bool {
 			}
 		}
 	}
-	if cmd.Resolve != nil && !validUTF8NoControl(cmd.Resolve.ReasonHash) {
-		return false
+	if cmd.Resolve != nil {
+		if !validUTF8NoControl(cmd.Resolve.ReasonHash) || !validSealedTallyProofStrings(cmd.Resolve.SealedTally) {
+			return false
+		}
 	}
 	if cmd.Expire != nil && !validUTF8NoControl(cmd.Expire.ReasonHash) {
 		return false
@@ -1849,6 +1899,7 @@ func cloneAccordSpec(s AccordSpec) AccordSpec {
 		out.Options = nil
 	}
 	out.Rules = cloneDecisionRules(s.Rules)
+	out.SealedTally = cloneSealedTallyConfig(s.SealedTally)
 	return out
 }
 
@@ -1872,6 +1923,7 @@ func cloneAccordCommand(c AccordCommand) AccordCommand {
 	}
 	if c.Vote != nil {
 		v := *c.Vote
+		v.Sealed = cloneSealedBallotPayload(c.Vote.Sealed)
 		out.Vote = &v
 	}
 	if c.Veto != nil {
@@ -1885,6 +1937,7 @@ func cloneAccordCommand(c AccordCommand) AccordCommand {
 	}
 	if c.Resolve != nil {
 		r := *c.Resolve
+		r.SealedTally = cloneSealedTallyProof(c.Resolve.SealedTally)
 		out.Resolve = &r
 	}
 	if c.Expire != nil {
@@ -2033,6 +2086,7 @@ func cloneAccordView(v AccordView) AccordView {
 	} else {
 		out.Votes = nil
 	}
+	out.SealedBallots = cloneRecordedSealedBallots(v.SealedBallots)
 	if len(v.Vetoes) > 0 {
 		out.Vetoes = make([]RecordedVeto, len(v.Vetoes))
 		for i, veto := range v.Vetoes {
