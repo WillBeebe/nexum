@@ -42,6 +42,15 @@ func TermsDigest(a *nexum.Agreement) ([32]byte, error) {
 	return out, nil
 }
 
+// PolicyDigest returns the keccak commitment to an agreement's current
+// execution policy snapshot (deadline, meter, and v2 mode/scheme).
+func PolicyDigest(a *nexum.Agreement) ([32]byte, error) {
+	if a == nil {
+		return [32]byte{}, fmt.Errorf("l2: nil agreement")
+	}
+	return executionPolicyDigest(a)
+}
+
 // executionPolicyDigest binds the current operational policy separately from
 // the kernel's immutable terms. A policy can change during an agreement's
 // lifetime, but a previously sealed batch commits to its particular snapshot.

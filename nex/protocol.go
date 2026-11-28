@@ -751,7 +751,10 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 		v.Report = c.Report
 		v.Phase = "review"
 	case "review":
-		if v.Phase != "review" || c.Review.ReportHash != Hash(v.Report) || !protocolHash(c.Review.AssessmentHash) {
+		if v.Phase != "review" {
+			return "", ErrProtocolPhase
+		}
+		if c.Review.ReportHash != Hash(v.Report) || !protocolHash(c.Review.AssessmentHash) {
 			return "", ErrProtocolEvidence
 		}
 		for _, r := range v.Reviews {
@@ -761,7 +764,10 @@ func (p *Protocol) Apply(c ProtocolCommand, signature []byte, height uint64) (st
 		}
 		v.Reviews = append(v.Reviews, RecordedReview{c.Actor, *c.Review})
 	case "resolve":
-		if v.Phase != "review" || c.Resolution.ReportHash != Hash(v.Report) || !protocolHash(c.Resolution.ReasonHash) {
+		if v.Phase != "review" {
+			return "", ErrProtocolPhase
+		}
+		if c.Resolution.ReportHash != Hash(v.Report) || !protocolHash(c.Resolution.ReasonHash) {
 			return "", ErrProtocolEvidence
 		}
 		outcome := c.Resolution.Outcome

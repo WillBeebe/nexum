@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	sealedProofDomainPrefix = "nexum/accord/sealed-proof/v1\x00"
+	sealedProofDomainPrefix = "github.com/WillBeebe/nexum/v2/accord/sealed-proof/v1\x00"
 	sealedSlotApprove       = "approve"
 	sealedSlotDissent       = "dissent"
 	sealedSlotExclusive     = "exclusive"

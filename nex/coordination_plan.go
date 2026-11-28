@@ -140,6 +140,42 @@ type GoalPlan struct {
 	Revisions []SignedPlanRevision
 }
 
+// ReadyTasks returns detached copies of all tasks in plan that are not yet in
+// completed and whose declared task dependencies are all satisfied by the exact
+// TaskOutcome recorded in completed. Tasks are returned in deterministic
+// revision and declaration order so coordinators can schedule fine-grained DAG
+// work without coarse wave barriers.
+func (p GoalPlan) ReadyTasks(completed map[string]TaskOutcome) []TaskSpec {
+	var ready []TaskSpec
+	for _, signed := range p.Revisions {
+		for _, task := range signed.Revision.Tasks {
+			id := task.ID()
+			if _, done := completed[id]; done {
+				continue
+			}
+			satisfied := true
+			for _, dep := range task.Dependencies {
+				if out, ok := completed[dep.TaskID]; !ok || out != dep.Outcome {
+					satisfied = false
+					break
+				}
+			}
+			if !satisfied {
+				continue
+			}
+			cp := task
+			cp.Authority.Signing = slices.Clone(task.Authority.Signing)
+			cp.Authority.Encryption = slices.Clone(task.Authority.Encryption)
+			cp.Outputs = slices.Clone(task.Outputs)
+			cp.FailureOutputs = slices.Clone(task.FailureOutputs)
+			cp.Dependencies = slices.Clone(task.Dependencies)
+			cp.GateDependencies = slices.Clone(task.GateDependencies)
+			ready = append(ready, cp)
+		}
+	}
+	return ready
+}
+
 type goalTaskLocation struct {
 	Revision, Task int
 }
@@ -376,8 +412,15 @@ func (s *GoalStore) Stats() StoreStats {
 func parseGoalRecord(raw []byte, id string) (goalRecord, error) {
 	var record goalRecord
 	if json.Unmarshal(raw, &record) != nil || record.Version != goalRecordVersion ||
-		record.Plan.Spec.ID() != id || !protocolHash(record.Plan.Head) ||
+		record.Plan.Spec.validate() != nil || record.Plan.Spec.ID() != id || !protocolHash(record.Plan.Head) ||
 		record.Tasks == nil || record.Requests == nil || len(record.Requests) != len(record.Plan.Revisions) {
+		return goalRecord{}, ErrCorruptStore
+	}
+	expectedHead := id
+	if n := len(record.Plan.Revisions); n > 0 {
+		expectedHead = record.Plan.Revisions[n-1].Head()
+	}
+	if record.Plan.Head != expectedHead {
 		return goalRecord{}, ErrCorruptStore
 	}
 	if record.Gates == nil {
@@ -449,9 +492,37 @@ func (s *GoalStore) confirmPlan() error {
 	return nil
 }
 
+func clonePlanRevision(rev PlanRevision) PlanRevision {
+	out := rev
+	if rev.Tasks != nil {
+		out.Tasks = make([]TaskSpec, len(rev.Tasks))
+		for i, task := range rev.Tasks {
+			t := task
+			t.Authority.Signing = slices.Clone(task.Authority.Signing)
+			t.Authority.Encryption = slices.Clone(task.Authority.Encryption)
+			t.Outputs = slices.Clone(task.Outputs)
+			t.FailureOutputs = slices.Clone(task.FailureOutputs)
+			t.Dependencies = slices.Clone(task.Dependencies)
+			t.GateDependencies = slices.Clone(task.GateDependencies)
+			out.Tasks[i] = t
+		}
+	}
+	if rev.Gates != nil {
+		out.Gates = make([]AccordGate, len(rev.Gates))
+		for i, gate := range rev.Gates {
+			g := gate
+			g.AllowedOptions = slices.Clone(gate.AllowedOptions)
+			out.Gates[i] = g
+		}
+	}
+	return out
+}
+
 // Apply commits a planner-signed revision using head compare-and-swap. Exact
 // resends return their original revision head even after later revisions.
 func (s *GoalStore) Apply(rev PlanRevision, signature []byte) (string, error) {
+	rev = clonePlanRevision(rev)
+	sig := slices.Clone(signature)
 	var head string
 	err := s.store.withLocked(rev.GoalID, func(tx checkpointTx) error {
 		record, err := s.loadWith(tx, rev.GoalID)
@@ -459,14 +530,24 @@ func (s *GoalStore) Apply(rev PlanRevision, signature []byte) (string, error) {
 			return err
 		}
 		var advanced bool
-		head, advanced, err = record.apply(rev.GoalID, SignedPlanRevision{rev, signature})
+		head, advanced, err = record.apply(rev.GoalID, SignedPlanRevision{rev, sig})
 		if err != nil {
 			return err
 		}
 		if !advanced {
 			return s.confirmPlan()
 		}
-		return s.store.writeWith(tx, rev.GoalID, record)
+		meta, plainDigest, err := s.store.writeWithMeta(tx, rev.GoalID, record)
+		if err != nil {
+			return err
+		}
+		s.cached.Store(&cachedGoal{
+			id:          rev.GoalID,
+			meta:        meta,
+			plainDigest: plainDigest,
+			record:      record,
+		})
+		return nil
 	})
 	return head, err
 }

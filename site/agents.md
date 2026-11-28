@@ -7,7 +7,7 @@ through its public Go client: `github.com/WillBeebe/nexum/v2/nex`.
 
 ## First useful result
 
-Requires Go 1.25 or newer. The examples pin Nexum v2.1.0. Read `examples/COLLABORATION.md` for setup.
+Requires Go 1.25 or newer. The examples pin Nexum v2.2.0. Read `examples/COLLABORATION.md` for setup.
 From the comlink-client checkout:
 
 ```sh
@@ -44,7 +44,7 @@ communication, follow the client's AGENT.md and use its managed connection.
 Running these applications does not itself connect peers or authorize spending.
 
 The reusable API is `github.com/WillBeebe/nexum/v2/nex`; Nexum and nex are one Go
-module. Use Nexum v2.1.0. Installation instructions:
+module. Use Nexum v2.2.0. Installation instructions:
 https://github.com/WillBeebe/nexum/blob/main/docs/INSTALL.md
 
 
@@ -58,10 +58,10 @@ enforcement, trusted time, identity admission and recovery for its intended use.
 
 ## Durable agreement integration
 
-Nexum v2.1.0 keeps encrypted local and SQL checkpoints (`OpenSQL*Store`) and
+Nexum v2.2.0 keeps encrypted local and SQL checkpoints (`OpenSQL*Store`) and
 signed operation IDs, and includes `ProtocolVersionV2` (reviewed evidence
 manifests and explicit `incomplete` closeouts), `GoalStore` /
-`CoordinationStore` / `AccordGate` conditional DAG nodes / portable
+`GoalPlan.ReadyTasks` / `CoordinationStore` / `AccordGate` conditional DAG nodes / portable
 `TaskHandoff` proofs, `Accord` / `AccordStore` evidence-gated collective
 decisions (including `BallotPrivacySealedPaillier` CDS94 ballots, where
 individual ballots stay hidden from public observers while `TallyAuthority`

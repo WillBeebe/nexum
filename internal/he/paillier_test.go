@@ -309,3 +309,33 @@ func TestAggregateProofViaRandomnessProduct(t *testing.T) {
 		t.Fatal("aggregate proof accepted a false total")
 	}
 }
+
+func TestNewPaillierFailsClosedAndNilReceiverSafe(t *testing.T) {
+	for _, badBits := range []int{-1, 0, 512, 1023, 1025, 8194} {
+		if _, err := NewPaillier(badBits); err != ErrKeyGen {
+			t.Fatalf("NewPaillier(%d) = %v, want ErrKeyGen", badBits, err)
+		}
+	}
+	var nilP *Paillier
+	if _, err := nilP.Encrypt(big.NewInt(1)); err != ErrEnc {
+		t.Fatalf("nil Encrypt = %v", err)
+	}
+	if _, err := nilP.Add([]byte{1}, []byte{1}); err != ErrAdd {
+		t.Fatalf("nil Add = %v", err)
+	}
+	if _, err := nilP.Decrypt([]byte{1}); err != ErrDec {
+		t.Fatalf("nil Decrypt = %v", err)
+	}
+	if _, err := nilP.EncryptWithR(big.NewInt(1), big.NewInt(1)); err != ErrEnc {
+		t.Fatalf("nil EncryptWithR = %v", err)
+	}
+	if _, err := nilP.ProveEqual([]byte{1}, big.NewInt(1), big.NewInt(1)); err != ErrEnc {
+		t.Fatalf("nil ProveEqual = %v", err)
+	}
+	if ok, err := nilP.VerifyEqual([]byte{1}, big.NewInt(1), []byte(`{}`)); ok || err != nil {
+		t.Fatalf("nil VerifyEqual = (%v, %v)", ok, err)
+	}
+	if nilP.KeySize() != 0 || nilP.N() != nil {
+		t.Fatalf("nil KeySize/N = (%d, %v)", nilP.KeySize(), nilP.N())
+	}
+}

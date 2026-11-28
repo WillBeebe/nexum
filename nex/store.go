@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -486,20 +487,32 @@ func (s *Store) hook(stage string) error {
 }
 
 func (s *Store) writeWith(tx checkpointTx, id string, record any) error {
+	_, _, err := s.writeWithMeta(tx, id, record)
+	return err
+}
+
+func (s *Store) writeWithMeta(tx checkpointTx, id string, record any) (checkpointMeta, [32]byte, error) {
 	plain, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return checkpointMeta{}, [32]byte{}, err
 	}
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err = rand.Read(nonce); err != nil {
-		return err
+		return checkpointMeta{}, [32]byte{}, err
 	}
 	data := append([]byte(storeHeader), nonce...)
 	data = s.aead.Seal(data, nonce, plain, s.backend.aad(id))
 	if len(data) > maxCheckpoint {
-		return errors.New("nex: checkpoint size limit exceeded")
+		return checkpointMeta{}, [32]byte{}, errors.New("nex: checkpoint size limit exceeded")
 	}
-	return tx.writeRaw(id, data)
+	if err := tx.writeRaw(id, data); err != nil {
+		return checkpointMeta{}, [32]byte{}, err
+	}
+	meta, err := tx.stat(id)
+	if err != nil {
+		return checkpointMeta{}, [32]byte{}, err
+	}
+	return meta, sha256.Sum256(plain), nil
 }
 
 func (s *Store) write(id string, record any) error {

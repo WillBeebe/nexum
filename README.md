@@ -4,7 +4,7 @@ Nexum is an agreement framework for agents. **nex** is its Go client and local
 command-line demonstration. Agents sign commands that bind agreement terms and
 the current receipt head; the kernel enforces the permitted transitions.
 
-Experimental release **v2.1.0**, licensed under [Apache-2.0](LICENSE).
+Experimental release **v2.2.0**, licensed under [Apache-2.0](LICENSE).
 The source and tagged Go module are publicly available.
 
 See [Go installation and downstream usage](docs/INSTALL.md) for library imports,
@@ -32,7 +32,7 @@ go run ./examples/policy-graph
 The five collaboration labs plus the return, reconcile, coordination, accord,
 and policy-graph examples use the real Nexum implementation through `nex`. They
 need no hosted service, model key or GPU. The Go import path is
-`github.com/WillBeebe/nexum/v2/nex`. Pin `v2.1.0` for this release. See
+`github.com/WillBeebe/nexum/v2/nex`. Pin `v2.2.0` for this release. See
 [the design](docs/TECHNICAL_DESIGN.md) for API usage, architecture, trust
 boundaries and known limitations.
 
@@ -92,7 +92,8 @@ evidence-gated collective decisions alongside cryptographic, fencing, and
 durability hardening. Version 2.1.0 adds `AccordGate` conditional DAGs,
 `BallotPrivacySealedPaillier` CDS94 sealed-ballot Accords, `OpenSQL*Store`
 stateless SQL checkpoint failover, `adapter.AccordAuthority`, and native fuzz
-coverage. See [durable agreements](docs/DURABLE_AGREEMENTS.md),
+coverage. Version 2.2.0 adds `GoalPlan.ReadyTasks` deterministic DAG task
+scheduling alongside store, coordination, outbox, and Paillier hardening. See [durable agreements](docs/DURABLE_AGREEMENTS.md),
 `go run ./examples/durable-retry`, `go run ./examples/reconcile-handoff`,
 `go run ./examples/coordination`, `go run ./examples/accord`, and
 `go run ./examples/policy-graph`.

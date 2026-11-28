@@ -59,9 +59,22 @@ func OpenOutbox(dir string, key []byte) (*Outbox, error) {
 }
 
 func (o *Outbox) SetNow(now func() time.Time) {
-	if now != nil {
-		o.now = now
+	if now == nil {
+		return
 	}
+	o.mu.Lock()
+	o.now = now
+	o.mu.Unlock()
+}
+
+func (o *Outbox) clock() time.Time {
+	o.mu.Lock()
+	fn := o.now
+	o.mu.Unlock()
+	if fn == nil {
+		return time.Now()
+	}
+	return fn()
 }
 
 func (o *Outbox) setStopped(stopped bool) {
@@ -239,10 +252,7 @@ func (o *Outbox) Enqueue(item OutboundItem) error {
 		if err != ErrNotFound {
 			return err
 		}
-		if err = o.enforceQuota(item.Tenant); err != nil {
-			return err
-		}
-		if err = o.enforceHistory(item.Tenant); err != nil {
+		if err = o.enforceBounds(item.Tenant); err != nil {
 			return err
 		}
 		return o.vault.write(id, itemRecord{Version: Version, Item: item, Status: StatusPending})
@@ -278,7 +288,7 @@ func (o *Outbox) Due(tenant string) ([]RecordedItem, error) {
 	if err := validateID(tenant); err != nil {
 		return nil, err
 	}
-	now := o.now()
+	now := o.clock()
 	var out []RecordedItem
 	err := o.vault.withLock(func() error {
 		ids, err := o.vault.listIDs()
@@ -381,12 +391,12 @@ func (o *Outbox) reconcile(tenant, operationID string, auth Authority, enforceDu
 			}
 			return ErrDefinitive
 		}
-		if enforceDue && !stored.NextTry.IsZero() && o.now().Before(stored.NextTry) {
+		if enforceDue && !stored.NextTry.IsZero() && o.clock().Before(stored.NextTry) {
 			return ErrNotDue
 		}
 		got, err := auth.Apply(stored.Item)
 		stored.Attempts++
-		stored.NextTry = o.now().Add(backoff(stored.Item.Retry, stored.Attempts))
+		stored.NextTry = o.clock().Add(backoff(stored.Item.Retry, stored.Attempts))
 		if err != nil {
 			stored.Status = statusFor(got, err)
 			stored.Candidate = nil
@@ -501,44 +511,20 @@ func (o *Outbox) RecordVerified(tenant, operationID string, resp AuthenticatedRe
 	})
 }
 
-func (o *Outbox) enforceQuota(tenant string) error {
-	limit := o.Quota
-	if limit <= 0 {
-		limit = DefaultQuota
+func (o *Outbox) enforceBounds(tenant string) error {
+	quotaLimit := o.Quota
+	if quotaLimit <= 0 {
+		quotaLimit = DefaultQuota
+	}
+	historyLimit := o.HistoryLimit
+	if historyLimit <= 0 {
+		historyLimit = DefaultHistory
 	}
 	ids, err := o.vault.listIDs()
 	if err != nil {
 		return err
 	}
-	n := 0
-	for _, id := range ids {
-		var stored itemRecord
-		if err = o.vault.read(id, &stored); err != nil {
-			return err
-		}
-		if err = validateStored(stored); err != nil {
-			return err
-		}
-		if stored.Item.Tenant == tenant && !terminalOutbox(stored.Status) {
-			n++
-		}
-	}
-	if n >= limit {
-		return ErrQuota
-	}
-	return nil
-}
-
-func (o *Outbox) enforceHistory(tenant string) error {
-	limit := o.HistoryLimit
-	if limit <= 0 {
-		limit = DefaultHistory
-	}
-	ids, err := o.vault.listIDs()
-	if err != nil {
-		return err
-	}
-	n := 0
+	pending, total := 0, 0
 	for _, id := range ids {
 		var stored itemRecord
 		if err = o.vault.read(id, &stored); err != nil {
@@ -548,10 +534,13 @@ func (o *Outbox) enforceHistory(tenant string) error {
 			return err
 		}
 		if stored.Item.Tenant == tenant {
-			n++
+			total++
+			if !terminalOutbox(stored.Status) {
+				pending++
+			}
 		}
 	}
-	if n >= limit {
+	if pending >= quotaLimit || total >= historyLimit {
 		return ErrQuota
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/bits"
 	"runtime"
 	"sync"
@@ -100,7 +101,8 @@ func SearchContext(ctx context.Context, h Header, workers int) (Header, uint64, 
 		go func() {
 			defer wg.Done()
 			cand := h
-			for n := uint64(w); ; n += uint64(workers) {
+			step := uint64(workers)
+			for n := uint64(w); ; n += step {
 				if ok.Load() {
 					return
 				}
@@ -108,6 +110,9 @@ func SearchContext(ctx context.Context, h Header, workers int) (Header, uint64, 
 				if cand.Valid() {
 					found.Store(n)
 					ok.Store(true)
+					return
+				}
+				if math.MaxUint64-n < step {
 					return
 				}
 			}

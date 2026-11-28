@@ -163,7 +163,7 @@ func (s *CoordinationStore) loadAuthenticatedCached(tx checkpointTx, goalID, tas
 	s.mu.Lock()
 	entry, hit := s.cache[taskID]
 	s.mu.Unlock()
-	if hit && entry.meta.same(meta) && entry.plainDigest == plainDigest {
+	if hit && entry.state.Lease.GoalID == goalID && entry.meta.same(meta) && entry.plainDigest == plainDigest {
 		s.store.cacheHits.Add(1)
 		return cloneTaskCheckpoint(entry.state), true, nil
 	}

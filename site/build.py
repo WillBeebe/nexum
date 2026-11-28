@@ -11,6 +11,6 @@ if source.count(marker) != 1:
     raise ValueError("Expected one agent instructions placeholder")
 brief = (root / "agents.md").read_text()
 (out / "index.html").write_text(source.replace(marker, html.escape(brief)))
-for name in ("style.css", "site.js", "agents.md", "favicon.png", "favicon.ico"):
+for name in ("v2-kit.css", "v2-kit.js", "style.css", "site.js", "agents.md", "favicon.png", "favicon.ico"):
     shutil.copyfile(root / name, out / name)
 print(f"Built {out}")

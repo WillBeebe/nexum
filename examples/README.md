@@ -1,4 +1,4 @@
-# Collaboration examples — Nexum v2.1.0
+# Collaboration examples — Nexum v2.2.0
 
 Run from the repository root with Go 1.25 or newer:
 

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	bitORDomain      = "nexum/he/bit-or-v2\x00"
+	bitORDomain      = "github.com/WillBeebe/nexum/v2/he/bit-or-v2\x00"
 	bitORRounds      = 8
 	maxBitProofBytes = 128 << 10 // 128 KiB
 )

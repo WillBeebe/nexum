@@ -554,3 +554,57 @@ func TestProtocolStoreCacheBoundedAndExportConfirmsDurability(t *testing.T) {
 		t.Fatalf("exported bundle failed verification: %v", err)
 	}
 }
+
+func TestProtocolForeignCommandAndReviewResolvePhaseErrors(t *testing.T) {
+	f := newProtocolFixture(t)
+	p1, err := NewProtocol(f.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec2 := cloneProtocol(f.spec)
+	spec2.Nonce = "other-protocol"
+	p2, err := NewProtocol(spec2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Same actor uses the same RequestID ("admit-1") on p1 and p2.
+	admit1 := p1.Prepare(protocolPublic(f.owner).ID(), "", "", "admit", "admit-1", 1)
+	receipt1, err := p1.Apply(admit1, Sign(f.owner, "protocol", admit1), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admit2 := p2.Prepare(protocolPublic(f.owner).ID(), "", "", "admit", "admit-1", 1)
+	// Sending p2's signed command to p1 must be rejected as stale/foreign, not ErrOperationConflict.
+	rejectProtocolCommand(t, p1, f.owner, admit2, ErrProtocolStale)
+	// Same protocol reusing RequestID with different content still returns ErrOperationConflict.
+	conflict := admit1
+	conflict.Height = 2
+	rejectProtocolCommand(t, p1, f.owner, conflict, ErrOperationConflict)
+	// Exact retry still returns the original receipt even at a later height.
+	if retry, err := p1.Apply(admit1, Sign(f.owner, "protocol", admit1), 99); err != nil || retry != receipt1 {
+		t.Fatalf("exact retry got (%q, %v), want (%q, nil)", retry, err, receipt1)
+	}
+
+	// review and resolve attempted outside "review" phase must return ErrProtocolPhase.
+	p := enterProtocol(t, f)
+	earlyReview := p.Prepare(protocolPublic(f.witness).ID(), "witness", f.spec.Scope, "review", "early-review", 5)
+	earlyReview.Review = &WitnessReview{ReportHash: Hash("missing"), AssessmentHash: Hash("a")}
+	rejectProtocolCommand(t, p, f.witness, earlyReview, ErrProtocolPhase)
+
+	earlyResolve := p.Prepare(protocolPublic(f.owner).ID(), "owner", f.spec.Scope, "resolve", "early-resolve", 5)
+	earlyResolve.Resolution = &Resolution{ReportHash: Hash("missing"), Outcome: "accept", ReasonHash: Hash("r")}
+	rejectProtocolCommand(t, p, f.owner, earlyResolve, ErrProtocolPhase)
+
+	reportProtocol(t, p, f, WorkCompleted)
+	reviewProtocol(t, p, f, false)
+	resolveProtocol(t, p, f, "accept")
+
+	lateReview := p.Prepare(protocolPublic(f.witness).ID(), "witness", f.spec.Scope, "review", "late-review", 8)
+	lateReview.Review = &WitnessReview{ReportHash: Hash(p.View().Report), AssessmentHash: Hash("a2")}
+	rejectProtocolCommand(t, p, f.witness, lateReview, ErrProtocolPhase)
+
+	lateResolve := p.Prepare(protocolPublic(f.owner).ID(), "owner", f.spec.Scope, "resolve", "late-resolve", 8)
+	lateResolve.Resolution = &Resolution{ReportHash: Hash(p.View().Report), Outcome: "reject", ReasonHash: Hash("r2")}
+	rejectProtocolCommand(t, p, f.owner, lateResolve, ErrProtocolPhase)
+}

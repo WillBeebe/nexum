@@ -199,7 +199,7 @@ func (c *Contract) rebuildConsent() {
 	agreed := false
 	for _, r := range c.agreement.Receipts {
 		switch {
-		case r.Action == "evidence" && r.Actor == c.agreement.Seller && strings.HasPrefix(r.Note, "signed-consent:"):
+		case r.Action == "evidence" && r.Actor == c.agreement.Seller && !agreed && strings.HasPrefix(r.Note, "signed-consent:"):
 			c.consent = append(c.consent, ConsentEvent{Action: "agree", Head: r.Hash})
 			agreed = true
 		case r.Action == "reject" && agreed:

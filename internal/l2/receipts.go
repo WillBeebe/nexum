@@ -1,6 +1,7 @@
 package l2
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,9 @@ func receiptHash(b []byte) [32]byte {
 	return out
 }
 func SealReceipts(cs []ReceiptCommitment, parent [32]byte, bits int, now time.Time) (ReceiptBatch, error) {
+	return SealReceiptsContext(context.Background(), cs, parent, bits, now)
+}
+func SealReceiptsContext(ctx context.Context, cs []ReceiptCommitment, parent [32]byte, bits int, now time.Time) (ReceiptBatch, error) {
 	if bits < 1 || bits > 24 {
 		return ReceiptBatch{}, fmt.Errorf("l2: difficulty must be 1..24")
 	}
@@ -73,7 +77,7 @@ func SealReceipts(cs []ReceiptCommitment, parent [32]byte, bits int, now time.Ti
 	if err != nil {
 		return ReceiptBatch{}, err
 	}
-	h, _, err := pow.Search(pow.Header{Parent: parent, BatchRoot: root, DiffBits: bits, TimeUnix: now.Unix()}, 0)
+	h, _, err := pow.SearchContext(ctx, pow.Header{Parent: parent, BatchRoot: root, DiffBits: bits, TimeUnix: now.Unix()}, 0)
 	return ReceiptBatch{Version: 1, Commitments: cs, Header: h}, err
 }
 func VerifyReceiptBatch(b ReceiptBatch, parent [32]byte, minBits int) error {

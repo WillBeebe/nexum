@@ -21,7 +21,7 @@ import (
 const (
 	maxTrialPrime         = 65537
 	coprimeChallengeCount = 8
-	coprimeDomain         = "nexum/he/coprime-v1\x00"
+	coprimeDomain         = "github.com/WillBeebe/nexum/v2/he/coprime-v1\x00"
 	zkChallengeDomain     = "nex/zk-equal-v2\x00"
 )
 
@@ -164,12 +164,9 @@ type Paillier struct {
 }
 
 // NewPaillier generates a fresh keypair with a modulus of bits
-// (2048 default; 3072 for a stronger budget).
+// (1024..8192 even; 2048 default; 3072 for a stronger budget).
 func NewPaillier(bits int) (*Paillier, error) {
-	if bits < 1024 {
-		bits = 2048
-	}
-	if bits > 8192 {
+	if bits < 1024 || bits > 8192 || bits%2 != 0 {
 		return nil, ErrKeyGen
 	}
 	pBits := bits / 2
@@ -238,6 +235,9 @@ func randomUnit(modulus *big.Int) (*big.Int, error) {
 
 // Encrypt m (0 <= m < n) to a ciphertext in Z_{n^2}*.
 func (p *Paillier) Encrypt(m *big.Int) ([]byte, error) {
+	if p == nil || p.n == nil || p.n2 == nil || p.g == nil {
+		return nil, ErrEnc
+	}
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
 		return nil, ErrEnc
 	}
@@ -311,7 +311,12 @@ func (p *Paillier) Mul(a, b []byte) ([]byte, error) {
 }
 
 // KeySize reports the modulus bit length (for fleet inventory).
-func (p *Paillier) KeySize() int { return p.n.BitLen() }
+func (p *Paillier) KeySize() int {
+	if p == nil || p.n == nil {
+		return 0
+	}
+	return p.n.BitLen()
+}
 
 // Equal is a constant-time compare for ciphertexts (tests/audit).
 func (p *Paillier) Equal(a, b []byte) bool {
@@ -319,12 +324,20 @@ func (p *Paillier) Equal(a, b []byte) bool {
 }
 
 // N returns a copy of the public modulus (proof randomness lives mod n).
-func (p *Paillier) N() *big.Int { return new(big.Int).Set(p.n) }
+func (p *Paillier) N() *big.Int {
+	if p == nil || p.n == nil {
+		return nil
+	}
+	return new(big.Int).Set(p.n)
+}
 
 // EncryptWithR encrypts m with explicit randomness r. This is the prover
 // side of the equality proof: whoever holds r can later prove (zero-knowledge) what
 // the ciphertext encrypts, without revealing m or r.
 func (p *Paillier) EncryptWithR(m, r *big.Int) ([]byte, error) {
+	if p == nil || p.n == nil || p.n2 == nil || p.g == nil {
+		return nil, ErrEnc
+	}
 	if m == nil || m.Sign() < 0 || m.Cmp(p.n) >= 0 {
 		return nil, ErrEnc
 	}

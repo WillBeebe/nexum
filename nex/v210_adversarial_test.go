@@ -52,7 +52,7 @@ func testWriteLenFramed(h *bytes.Buffer, b []byte) {
 }
 
 func testBitORChallengesV2(mod *big.Int, domain, ct []byte, a0s, a1s [][]byte) [testBitORRounds][sha256.Size]byte {
-	const dom = "nexum/he/bit-or-v2\x00"
+	const dom = "github.com/WillBeebe/nexum/v2/he/bit-or-v2\x00"
 	var buf bytes.Buffer
 	buf.WriteString(dom)
 	testWriteLenFramed(&buf, mod.Bytes())
@@ -142,7 +142,7 @@ func forgeSingleRoundORForQ(t *testing.T, p, n, ct, r *big.Int, domain []byte) [
 	e0Int := new(big.Int)
 	rem := new(big.Int)
 	var prefixBuf bytes.Buffer
-	const dom = "nexum/he/bit-or-v2\x00"
+	const dom = "github.com/WillBeebe/nexum/v2/he/bit-or-v2\x00"
 	prefixBuf.WriteString(dom)
 	testWriteLenFramed(&prefixBuf, n.Bytes())
 	testWriteLenFramed(&prefixBuf, domain)

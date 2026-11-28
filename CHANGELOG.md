@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.2.0
+
+### Fine-grained DAG scheduling (`nex`)
+
+- **`GoalPlan.ReadyTasks`:** Added `GoalPlan.ReadyTasks(completed map[string]TaskOutcome) []TaskSpec`
+  returning detached copies of uncompleted tasks whose declared task dependencies
+  are satisfied by exact recorded `TaskOutcome` values, in deterministic revision
+  and declaration order.
+
+### Kernel, coordination, outbox, and crypto hardening (`nex`, `adapter`, `internal`)
+
+- **`GoalStore` & `CoordinationStore` (`nex`):** `GoalStore.Apply` defensively
+  deep-clones caller-owned `PlanRevision` slices (`Tasks`, `Gates`,
+  `Dependencies`, `GateDependencies`, `AllowedOptions`, outputs, authority keys)
+  and signatures before storage. `GoalStore` checkpoint loading validates
+  `Plan.Spec` and verifies `Plan.Head` matches the final revision head (or goal
+  ID), rejecting divergent heads with `ErrCorruptStore`.
+  `CoordinationStore` authenticated cache hits verify `entry.state.Lease.GoalID == goalID`.
+- **Contract consent & Unix store locks (`nex`):** `Contract.rebuildConsent`
+  requires both `Seller` actor and `!agreed` before appending a `"signed-consent:"`
+  consent event. Unix `lockStoreFile` retries `unix.Flock` on `unix.EINTR`.
+- **Outbox concurrency & bounds (`adapter`):** `Outbox.SetNow` and clock reads
+  synchronize under `o.mu`, and `Enqueue` checks pending quota and history limit
+  in a single vault pass (`enforceBounds`).
+- **Cryptography & L2 (`internal/he`, `internal/l2`, `internal/pow`):**
+  `he.NewPaillier` fails closed (`ErrKeyGen`) on invalid, odd, or out-of-range
+  bit lengths (`< 1024` or `> 8192`), and `Paillier` methods guard against nil
+  receivers (`Encrypt`, `EncryptWithR`, `KeySize`, `N`). Added `l2.PolicyDigest`
+  and `uint64` nonce overflow protection in `pow.SearchContext`.
+- **Site & CI:** Updated the static documentation site (`site/`) to the v2
+  refresh (`site/v2-kit.css`, `site/v2-kit.js`) and extended `.github/workflows/ci.yml`
+  to verify those built assets.
+
 ## v2.1.0
 
 ### Sealed-ballot Paillier Accords (`internal/he`, `nex`)

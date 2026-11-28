@@ -163,4 +163,53 @@ func TestArtifactRefVerifiesSizeAndDigest(t *testing.T) {
 			t.Fatalf("verified wrong bytes %q: %v", contents, err)
 		}
 	}
+	badUTF8 := ref
+	badUTF8.MediaType = "text/plain; a=\"\xff\""
+	if err := badUTF8.Validate(); !errors.Is(err, ErrProtocolEvidence) {
+		t.Fatalf("invalid UTF-8 media type accepted: %v", err)
+	}
+}
+
+func TestProtocolStoreApplyV1RejectsV2(t *testing.T) {
+	f := newProtocolFixture(t)
+	store, err := OpenProtocolStore(filepath.Join(t.TempDir(), "store-v1-compat"), bytes.Repeat([]byte{13}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ApplyV1 advances a v1 agreement normally.
+	v1ID, err := store.Create(f.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Cmd, err := store.Prepare(v1ID, protocolPublic(f.owner).ID(), "", "", "admit", "admit-v1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyV1(v1ID, v1Cmd, Sign(f.owner, "protocol", v1Cmd), 1); err != nil {
+		t.Fatalf("ApplyV1 on v1 failed: %v", err)
+	}
+
+	// ApplyV1 refuses to advance a v2 agreement without mutating state.
+	v2Spec := cloneProtocol(f.spec)
+	v2Spec.Version = ProtocolVersionV2
+	v2Spec.Nonce = "v2-rejected-by-applyv1"
+	v2ID, err := store.Create(v2Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Cmd, err := store.Prepare(v2ID, protocolPublic(f.owner).ID(), "", "", "admit", "admit-v2", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyV1(v2ID, v2Cmd, Sign(f.owner, "protocol", v2Cmd), 1); !errors.Is(err, ErrProtocolAuthority) {
+		t.Fatalf("ApplyV1 on v2 got %v, want ErrProtocolAuthority", err)
+	}
+	view, err := store.View(v2ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Admitted) != 0 || view.Head != v2ID {
+		t.Fatalf("rejected ApplyV1 mutated v2 state: %+v", view)
+	}
 }

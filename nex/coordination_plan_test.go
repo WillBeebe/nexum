@@ -240,3 +240,182 @@ func TestGoalSpecMultiPlannerScale(t *testing.T) {
 		t.Fatalf("expected ErrGoalSpec above maxPlanPlanners=%d, got %v", maxPlanPlanners, err)
 	}
 }
+
+func TestGoalPlanReadyTasksDAGScheduling(t *testing.T) {
+	planner, goal, base := planFixture(t)
+	store, err := OpenGoalStore(filepath.Join(t.TempDir(), "goals"), bytes.Repeat([]byte{31}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Create(goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	makeTask := func(nonce string, deps ...TaskDependency) TaskSpec {
+		ts := base
+		ts.Nonce = nonce
+		ts.Purpose = "build " + nonce
+		ts.Outputs = []string{"package"}
+		ts.FailureOutputs = []string{"diagnostic"}
+		ts.Dependencies = deps
+		return ts
+	}
+	depOn := func(input string, upstream TaskSpec, outcome TaskOutcome) TaskDependency {
+		slot := "package"
+		if outcome == TaskRejected {
+			slot = "diagnostic"
+		}
+		return TaskDependency{
+			Input: input, TaskID: upstream.ID(), ProtocolID: Hash("proto:" + upstream.Nonce),
+			Head: Hash("head:" + upstream.Nonce), Slot: slot, Digest: Hash("digest:" + upstream.Nonce),
+			Outcome: outcome,
+		}
+	}
+
+	// Build a diamond + straggler DAG:
+	//   spec -> {crypto, query (slow straggler)}
+	//   crypto -> wal (does NOT wait for slow query!)
+	//   wal + query -> engine
+	//   wal(rejected) -> wal_repair (only triggers on TaskRejected!)
+	tSpec := makeTask("spec")
+	tCrypto := makeTask("crypto", depOn("spec", tSpec, TaskAccepted))
+	tQuery := makeTask("query", depOn("spec", tSpec, TaskAccepted))
+	tWAL := makeTask("wal", depOn("spec", tSpec, TaskAccepted), depOn("crypto", tCrypto, TaskAccepted))
+	tEngine := makeTask("engine", depOn("wal", tWAL, TaskAccepted), depOn("query", tQuery, TaskAccepted))
+	tWALRepair := makeTask("wal-repair", depOn("wal_fail", tWAL, TaskRejected))
+
+	rev := PlanRevision{
+		GoalID: id, Head: id, Planner: goal.Planners[0].ID(), RequestID: "dag-v1",
+		Tasks: []TaskSpec{tSpec, tCrypto, tQuery, tWAL, tEngine, tWALRepair},
+	}
+	head, err := store.Apply(rev, Sign(planner, PlanSignatureDomain, rev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Apply must warm the Task cache so immediate lookups across parallel workers hit RAM cache.
+	statsBefore := store.Stats()
+	if _, err := store.Task(id, tEngine.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if store.Stats().CacheHits <= statsBefore.CacheHits {
+		t.Fatalf("expected GoalStore.Apply to warm Task cache: before=%+v after=%+v", statsBefore, store.Stats())
+	}
+
+	plan, err := store.View(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyGoalPlan(plan, id, head); err != nil {
+		t.Fatal(err)
+	}
+
+	nonces := func(ts []TaskSpec) []string {
+		out := make([]string, len(ts))
+		for i, x := range ts {
+			out[i] = x.Nonce
+		}
+		return out
+	}
+
+	completed := map[string]TaskOutcome{}
+	if got := nonces(plan.ReadyTasks(completed)); len(got) != 1 || got[0] != "spec" {
+		t.Fatalf("initial ready = %v, want [spec]", got)
+	}
+
+	// Completing spec unblocks both crypto and query.
+	completed[tSpec.ID()] = TaskAccepted
+	if got := nonces(plan.ReadyTasks(completed)); len(got) != 2 || got[0] != "crypto" || got[1] != "query" {
+		t.Fatalf("after spec ready = %v, want [crypto query]", got)
+	}
+
+	// Completing crypto IMMEDIATELY unblocks wal WITHOUT waiting for slow straggler query!
+	completed[tCrypto.ID()] = TaskAccepted
+	if got := nonces(plan.ReadyTasks(completed)); len(got) != 2 || got[0] != "query" || got[1] != "wal" {
+		t.Fatalf("after crypto ready = %v, want [query wal]", got)
+	}
+
+	// Verify returned TaskSpec slices are detached from plan.
+	readyDetached := plan.ReadyTasks(completed)
+	readyDetached[0].Dependencies[0].Digest = Hash("mutated")
+	if plan.ReadyTasks(completed)[0].Dependencies[0].Digest == Hash("mutated") {
+		t.Fatal("ReadyTasks returned shared mutable dependency slice")
+	}
+
+	// If wal is rejected, wal-repair unblocks while engine stays blocked.
+	completed[tWAL.ID()] = TaskRejected
+	if got := nonces(plan.ReadyTasks(completed)); len(got) != 2 || got[0] != "query" || got[1] != "wal-repair" {
+		t.Fatalf("after wal rejected ready = %v, want [query wal-repair]", got)
+	}
+
+	// If wal and query are both accepted, engine unblocks and wal-repair does not.
+	completed[tWAL.ID()] = TaskAccepted
+	completed[tQuery.ID()] = TaskAccepted
+	if got := nonces(plan.ReadyTasks(completed)); len(got) != 1 || got[0] != "engine" {
+		t.Fatalf("after wal+query accepted ready = %v, want [engine]", got)
+	}
+}
+
+func TestGoalStoreApplyClonesCallerSlices(t *testing.T) {
+	planner, goal, first := planFixture(t)
+	store, err := OpenGoalStore(filepath.Join(t.TempDir(), "goals"), bytes.Repeat([]byte{41}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Create(goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskCopy := first
+	taskCopy.Outputs = []string{"artifact-a"}
+	wantID := taskCopy.ID()
+	rev := PlanRevision{
+		GoalID: id, Head: id, Planner: goal.Planners[0].ID(), RequestID: "clone-check",
+		Tasks: []TaskSpec{taskCopy},
+	}
+	sig := Sign(planner, PlanSignatureDomain, rev)
+	if _, err := store.Apply(rev, sig); err != nil {
+		t.Fatal(err)
+	}
+	// Mutating caller slices after Apply must not corrupt the cached GoalStore record.
+	rev.Tasks[0].Outputs[0] = "corrupted"
+	sig[0] ^= 0xff
+	got, err := store.Task(id, wantID)
+	if err != nil {
+		t.Fatalf("Task after caller slice mutation failed: %v", err)
+	}
+	if len(got.Outputs) != 1 || got.Outputs[0] != "artifact-a" {
+		t.Fatalf("cached Task outputs mutated via caller alias: %v", got.Outputs)
+	}
+}
+
+func TestGoalStoreLoadRejectsDivergentHead(t *testing.T) {
+	planner, goal, first := planFixture(t)
+	store, err := OpenGoalStore(filepath.Join(t.TempDir(), "goals"), bytes.Repeat([]byte{43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Create(goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev := PlanRevision{GoalID: id, Head: id, Planner: goal.Planners[0].ID(), RequestID: "r1", Tasks: []TaskSpec{first}}
+	if _, err := store.Apply(rev, Sign(planner, PlanSignatureDomain, rev)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the stored record's Plan.Head so it diverges from Revisions[0].Head().
+	if err := store.store.withLocked(id, func(tx checkpointTx) error {
+		record, err := store.loadWith(tx, id)
+		if err != nil {
+			return err
+		}
+		record.Plan.Head = Hash("divergent-head")
+		return store.store.writeWith(tx, id, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.View(id); !errors.Is(err, ErrCorruptStore) {
+		t.Fatalf("View with divergent Plan.Head got %v, want ErrCorruptStore", err)
+	}
+}

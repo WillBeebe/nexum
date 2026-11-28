@@ -78,7 +78,7 @@ jobs:
           set -euo pipefail
           trap 'rm -rf site/dist' EXIT
           python3 site/build.py
-          for asset in index.html style.css site.js agents.md favicon.png favicon.ico; do
+          for asset in index.html style.css site.js v2-kit.css v2-kit.js agents.md favicon.png favicon.ico; do
             test -s "site/dist/$asset"
           done
 

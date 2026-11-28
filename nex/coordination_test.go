@@ -361,3 +361,375 @@ func TestCoordinationStoreCacheInvalidatedBeforeUncertainWrite(t *testing.T) {
 		t.Fatal("stale pre-rename entry remained in CoordinationStore cache after uncertain Finalize write")
 	}
 }
+
+func TestDiscoverGoalSurfacesCorruptDependency(t *testing.T) {
+	planner, goal, first := planFixture(t)
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{43}, 32)
+	goals, err := OpenGoalStore(filepath.Join(dir, "goals"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalID, err := goals.Create(goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Nonce = "downstream"
+	second.Purpose = "Consume upstream artifact"
+	second.Dependencies = []TaskDependency{{
+		Input: "upstream", TaskID: first.ID(), ProtocolID: Hash("proto-upstream"),
+		Head: Hash("head-upstream"), Slot: "change", Digest: Hash("digest-upstream"), Outcome: TaskAccepted,
+	}}
+	rev := PlanRevision{
+		GoalID: goalID, Head: goalID, Planner: goal.Planners[0].ID(), RequestID: "r1",
+		Tasks: []TaskSpec{first, second},
+	}
+	if _, err := goals.Apply(rev, Sign(planner, PlanSignatureDomain, rev)); err != nil {
+		t.Fatal(err)
+	}
+	protocols, err := OpenProtocolStore(filepath.Join(dir, "protocols"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coord, err := OpenCoordinationStore(filepath.Join(dir, "coord"), key, goals, protocols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// When upstream is merely unclaimed, DiscoverGoal must not perform a redundant s.Result read.
+	unclaimed, misses, err := coord.DiscoverGoal(goalID, 1)
+	if err != nil {
+		t.Fatalf("DiscoverGoal unclaimed: %v", err)
+	}
+	if misses != 0 || len(unclaimed) != 2 || unclaimed[1].DependenciesReady {
+		t.Fatalf("unexpected unclaimed discovery: misses=%d out=%+v", misses, unclaimed)
+	}
+	// Write corrupt ciphertext at the upstream dependency's coordination path; DiscoverGoal must surface ErrCorruptStore.
+	if err := os.WriteFile(coord.store.path(first.ID()), []byte("corrupt-ciphertext"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := coord.DiscoverGoal(goalID, 1); !errors.Is(err, ErrCorruptStore) {
+		t.Fatalf("expected DiscoverGoal to surface ErrCorruptStore on corrupt dependency, got %v", err)
+	}
+}
+
+func TestLoadAuthenticatedCachedRejectsWrongGoalID(t *testing.T) {
+	f := newHandoffFixture(t, true)
+	v := f.p.View()
+	if _, err := f.store.Finalize(f.lease, v.Head, v.Height); err != nil {
+		t.Fatal(err)
+	}
+	// Warm the cache under the real goal ID.
+	if _, misses, err := f.store.DiscoverGoal(f.request.GoalID, v.Height); err != nil || misses != 1 {
+		t.Fatalf("warm DiscoverGoal: misses=%d err=%v", misses, err)
+	}
+	// Querying the same task checkpoint under a different goal ID must still fail
+	// with ErrCorruptStore instead of returning the warm cached state.
+	otherGoal := Hash("foreign-goal")
+	err := f.store.store.withLocked(f.request.TaskID, func(tx checkpointTx) error {
+		_, _, err := f.store.loadAuthenticatedCached(tx, otherGoal, f.request.TaskID)
+		return err
+	})
+	if !errors.Is(err, ErrCorruptStore) {
+		t.Fatalf("loadAuthenticatedCached with wrong goalID got %v, want ErrCorruptStore", err)
+	}
+}
+
+func TestCoordinationDownstreamDependencyEnforcementAndRejection(t *testing.T) {
+	f := newProtocolFixture(t)
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{47}, 32)
+	goals, err := OpenGoalStore(filepath.Join(dir, "goals"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := OpenProtocolStore(filepath.Join(dir, "attempts"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coord, err := OpenCoordinationStore(filepath.Join(dir, "tasks"), key, goals, attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := protocolPublic(f.owner)
+	workerID := protocolPublic(f.worker).ID()
+	goalID, err := goals.Create(GoalSpec{
+		Nonce: "dep-enforcement", Purpose: "Verify rejection handoff and downstream input binding",
+		ConstraintsHash: Hash("c"), CompletionPolicyHash: Hash("p"), Planners: []Public{owner},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := TaskSpec{
+		GoalID: goalID, Nonce: "upstream", Purpose: f.spec.Purpose, Scope: f.spec.Scope,
+		SpecificationHash: f.spec.SpecificationHash, AcceptanceHash: f.spec.AcceptanceHash,
+		FailurePolicyHash: f.spec.FailurePolicyHash, Authority: owner,
+		Outputs: []string{"answer"}, FailureOutputs: []string{"failure"},
+	}
+	rev1 := PlanRevision{
+		GoalID: goalID, Head: goalID, Planner: owner.ID(), RequestID: "plan-1", Tasks: []TaskSpec{upstream},
+	}
+	planHead, err := goals.Apply(rev1, Sign(f.owner, PlanSignatureDomain, rev1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	makeSpec := func(taskID, nonce string, gen uint64) ProtocolSpec {
+		s := cloneProtocol(f.spec)
+		s.Version = ProtocolVersionV2
+		s.TaskID = taskID
+		s.Generation = gen
+		s.Nonce = nonce
+		return s
+	}
+	syncEvents := func(p *Protocol, protocolID string) {
+		t.Helper()
+		for _, ev := range p.Bundle().Events {
+			if _, err := attempts.Apply(protocolID, ev.Command, ev.Signature, ev.Command.Height); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Generation 1 of upstream ends in a "reject" resolution (TaskRejected).
+	spec1 := makeSpec(upstream.ID(), "up-gen-1", 1)
+	p1, err := NewProtocol(spec1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req1 := ClaimRequest{
+		GoalID: goalID, TaskID: upstream.ID(), WorkerID: workerID,
+		RequestID: "claim-up-1", ProtocolID: p1.View().ID, ExpectedGeneration: 0, LeaseUntilHeight: 41,
+	}
+	sig1 := Sign(f.owner, ClaimSignatureDomain, req1)
+	lease1, err := coord.Claim(req1, sig1, spec1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f1 := f
+	f1.spec = spec1
+	p1 = enterProtocol(t, f1)
+	reportProtocol(t, p1, f1, WorkFailedSafely)
+	reviewProtocol(t, p1, f1, false)
+	resolveProtocol(t, p1, f1, "reject")
+	protocolApply(t, p1, f.owner, "owner", "return", func(c *ProtocolCommand) {
+		m := manifestFor(p1)
+		c.Return = &m
+	})
+	syncEvents(p1, req1.ProtocolID)
+	v1 := p1.View()
+	res1, err := coord.Finalize(lease1, v1.Head, v1.Height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res1.Outcome != TaskRejected || len(res1.Artifacts) != 1 || res1.Artifacts[0].Slot != "failure" {
+		t.Fatalf("rejected attempt result = %+v", res1)
+	}
+	// Exact Finalize retry succeeds even after lease expiry; mismatched head fails.
+	if retry, err := coord.Finalize(lease1, v1.Head, lease1.LeaseUntilHeight+5); err != nil || retry.Head != res1.Head {
+		t.Fatalf("post-expiry Finalize retry = (%+v, %v)", retry, err)
+	}
+	if _, err := coord.Finalize(lease1, Hash("wrong-head"), v1.Height); !errors.Is(err, ErrTaskStale) {
+		t.Fatalf("Finalize with wrong head got %v, want ErrTaskStale", err)
+	}
+
+	// Generation 2 reclaims upstream before gen-1 lease expiry and gets accepted.
+	spec2 := makeSpec(upstream.ID(), "up-gen-2", 2)
+	p2, err := NewProtocol(spec2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2 := ClaimRequest{
+		GoalID: goalID, TaskID: upstream.ID(), WorkerID: workerID,
+		RequestID: "claim-up-2", ProtocolID: p2.View().ID, ExpectedGeneration: 1, LeaseUntilHeight: 41,
+	}
+	sig2 := Sign(f.owner, ClaimSignatureDomain, req2)
+	lease2, err := coord.Claim(req2, sig2, spec2, v1.Height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2 := f
+	f2.spec = spec2
+	p2 = enterProtocol(t, f2)
+	upAnswer := testArtifactRef("upstream verified answer")
+	protocolApply(t, p2, f.worker, "worker", "report", func(c *ProtocolCommand) {
+		c.Report = &WorkReport{
+			Outcome: WorkCompleted, Stage: "work", ReasonHash: Hash("done"), Evidence: []string{upAnswer.Digest},
+			Manifest: &EvidenceManifest{MethodHash: Hash("method"), Outputs: []NamedArtifact{{Name: "answer", Ref: upAnswer}}},
+		}
+	})
+	reviewProtocol(t, p2, f2, false)
+	resolveProtocol(t, p2, f2, "accept")
+	protocolApply(t, p2, f.worker, "worker", "return", func(c *ProtocolCommand) {
+		m := manifestFor(p2)
+		m.Artifacts[0].Commitment = upAnswer.Digest
+		c.Return = &m
+	})
+	syncEvents(p2, req2.ProtocolID)
+	v2 := p2.View()
+	res2, err := coord.Finalize(lease2, v2.Head, v2.Height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Outcome != TaskAccepted {
+		t.Fatalf("gen-2 outcome = %s, want accepted", res2.Outcome)
+	}
+	// Generation 1's TaskRejected handoff remains exportable and offline-verifiable after gen-2 acceptance.
+	rejectedHandoff, err := coord.ExportHandoff(req1, sig1)
+	if err != nil {
+		t.Fatalf("ExportHandoff for prior rejected gen failed: %v", err)
+	}
+	verifiedRej, err := VerifyTaskHandoff(rejectedHandoff, upstream.ID(), Hash(rejectedHandoff.Result))
+	if err != nil || verifiedRej.Outcome != TaskRejected {
+		t.Fatalf("VerifyTaskHandoff rejected gen = (%+v, %v)", verifiedRej, err)
+	}
+
+	// Add two downstream tasks: one pins the exact accepted upstream output,
+	// one pins a mismatched digest.
+	downstreamOK := TaskSpec{
+		GoalID: goalID, Nonce: "downstream-ok", Purpose: f.spec.Purpose, Scope: f.spec.Scope,
+		SpecificationHash: f.spec.SpecificationHash, AcceptanceHash: f.spec.AcceptanceHash,
+		FailurePolicyHash: f.spec.FailurePolicyHash, Authority: owner,
+		Outputs: []string{"answer"}, FailureOutputs: []string{"failure"},
+		Dependencies: []TaskDependency{{
+			Input: "up_input", TaskID: upstream.ID(), ProtocolID: req2.ProtocolID,
+			Head: res2.Head, Slot: "answer", Digest: upAnswer.Digest, Outcome: TaskAccepted,
+		}},
+	}
+	downstreamBadPin := downstreamOK
+	downstreamBadPin.Nonce = "downstream-bad-pin"
+	downstreamBadPin.Dependencies = []TaskDependency{{
+		Input: "up_input", TaskID: upstream.ID(), ProtocolID: req2.ProtocolID,
+		Head: res2.Head, Slot: "answer", Digest: Hash("wrong-digest"), Outcome: TaskAccepted,
+	}}
+	rev2 := PlanRevision{
+		GoalID: goalID, Head: planHead, Planner: owner.ID(), RequestID: "plan-2",
+		Tasks: []TaskSpec{downstreamOK, downstreamBadPin},
+	}
+	if _, err := goals.Apply(rev2, Sign(f.owner, PlanSignatureDomain, rev2)); err != nil {
+		t.Fatal(err)
+	}
+
+	// DiscoverGoal flags ready vs mismatch accurately.
+	discovered, _, err := coord.DiscoverGoal(goalID, v2.Height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered) != 3 || !discovered[1].DependenciesReady || discovered[1].DependenciesMismatch {
+		t.Fatalf("downstreamOK discovery = %+v", discovered[1])
+	}
+	if discovered[2].DependenciesReady || !discovered[2].DependenciesMismatch {
+		t.Fatalf("downstreamBadPin discovery = %+v", discovered[2])
+	}
+
+	// Claiming downstreamBadPin must fail with ErrTaskDependency.
+	badSpec := makeSpec(downstreamBadPin.ID(), "down-bad-gen-1", 1)
+	badP, err := NewProtocol(badSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badReq := ClaimRequest{
+		GoalID: goalID, TaskID: downstreamBadPin.ID(), WorkerID: workerID,
+		RequestID: "claim-bad", ProtocolID: badP.View().ID, ExpectedGeneration: 0, LeaseUntilHeight: 41,
+	}
+	if _, err := coord.Claim(badReq, Sign(f.owner, ClaimSignatureDomain, badReq), badSpec, 1); !errors.Is(err, ErrTaskDependency) {
+		t.Fatalf("Claim with mismatched dependency got %v, want ErrTaskDependency", err)
+	}
+
+	// Claim downstreamOK, complete its protocol WITHOUT declaring the required
+	// dependency digest in WorkReport.Manifest.Inputs -> Finalize must reject with ErrTaskDependency.
+	downSpec := makeSpec(downstreamOK.ID(), "down-ok-gen-1", 1)
+	downP, err := NewProtocol(downSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downReq := ClaimRequest{
+		GoalID: goalID, TaskID: downstreamOK.ID(), WorkerID: workerID,
+		RequestID: "claim-down-1", ProtocolID: downP.View().ID, ExpectedGeneration: 0, LeaseUntilHeight: 41,
+	}
+	downLease, err := coord.Claim(downReq, Sign(f.owner, ClaimSignatureDomain, downReq), downSpec, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := f
+	fd.spec = downSpec
+	downP = enterProtocol(t, fd)
+	downAnswer := testArtifactRef("downstream answer")
+	protocolApply(t, downP, f.worker, "worker", "report", func(c *ProtocolCommand) {
+		c.Report = &WorkReport{
+			Outcome: WorkCompleted, Stage: "work", ReasonHash: Hash("done"), Evidence: []string{downAnswer.Digest},
+			Manifest: &EvidenceManifest{
+				MethodHash: Hash("method"),
+				Inputs:     []NamedArtifact{{Name: "up_input", Ref: testArtifactRef("wrong input bytes")}},
+				Outputs:    []NamedArtifact{{Name: "answer", Ref: downAnswer}},
+			},
+		}
+	})
+	reviewProtocol(t, downP, fd, false)
+	resolveProtocol(t, downP, fd, "accept")
+	protocolApply(t, downP, f.worker, "worker", "return", func(c *ProtocolCommand) {
+		m := manifestFor(downP)
+		m.Artifacts[0].Commitment = downAnswer.Digest
+		c.Return = &m
+	})
+	syncEvents(downP, downReq.ProtocolID)
+	dv := downP.View()
+	if _, err := coord.Finalize(downLease, dv.Head, dv.Height); !errors.Is(err, ErrTaskDependency) {
+		t.Fatalf("Finalize omitting verified dependency input got %v, want ErrTaskDependency", err)
+	}
+
+	// Reclaim downstreamOK after gen-1 lease expiry with the exact upstream digest
+	// declared in WorkReport.Manifest.Inputs -> Finalize and offline handoff succeed.
+	downSpec2 := makeSpec(downstreamOK.ID(), "down-ok-gen-2", 2)
+	downSpec2.WorkByHeight = 60
+	downSpec2.ReturnByHeight = 80
+	for i := range downSpec2.Roles {
+		downSpec2.Roles[i].ExpiresAtHeight = 80
+	}
+	downP2, err := NewProtocol(downSpec2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downReq2 := ClaimRequest{
+		GoalID: goalID, TaskID: downstreamOK.ID(), WorkerID: workerID,
+		RequestID: "claim-down-2", ProtocolID: downP2.View().ID, ExpectedGeneration: 1, LeaseUntilHeight: 81,
+	}
+	downSig2 := Sign(f.owner, ClaimSignatureDomain, downReq2)
+	downLease2, err := coord.Claim(downReq2, downSig2, downSpec2, downLease.LeaseUntilHeight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd2 := f
+	fd2.spec = downSpec2
+	downP2 = enterProtocol(t, fd2)
+	protocolApply(t, downP2, f.worker, "worker", "report", func(c *ProtocolCommand) {
+		c.Report = &WorkReport{
+			Outcome: WorkCompleted, Stage: "work", ReasonHash: Hash("done"), Evidence: []string{downAnswer.Digest},
+			Manifest: &EvidenceManifest{
+				MethodHash: Hash("method"),
+				Inputs:     []NamedArtifact{{Name: "up_input", Ref: upAnswer}},
+				Outputs:    []NamedArtifact{{Name: "answer", Ref: downAnswer}},
+			},
+		}
+	})
+	reviewProtocol(t, downP2, fd2, false)
+	resolveProtocol(t, downP2, fd2, "accept")
+	protocolApply(t, downP2, f.worker, "worker", "return", func(c *ProtocolCommand) {
+		m := manifestFor(downP2)
+		m.Artifacts[0].Commitment = downAnswer.Digest
+		c.Return = &m
+	})
+	syncEvents(downP2, downReq2.ProtocolID)
+	dv2 := downP2.View()
+	downRes2, err := coord.Finalize(downLease2, dv2.Head, dv2.Height)
+	if err != nil || downRes2.Outcome != TaskAccepted {
+		t.Fatalf("Finalize with matching dependency input = (%+v, %v)", downRes2, err)
+	}
+	downHandoff, err := coord.ExportHandoff(downReq2, downSig2)
+	if err != nil {
+		t.Fatalf("ExportHandoff downstream accepted failed: %v", err)
+	}
+	if got, err := VerifyTaskHandoff(downHandoff, downstreamOK.ID(), Hash(downHandoff.Result)); err != nil || got.Outcome != TaskAccepted {
+		t.Fatalf("VerifyTaskHandoff downstream = (%+v, %v)", got, err)
+	}
+}

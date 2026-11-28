@@ -9,5 +9,10 @@ import (
 )
 
 func lockStoreFile(f *os.File) error {
-	return unix.Flock(int(f.Fd()), unix.LOCK_EX)
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		if err != unix.EINTR {
+			return err
+		}
+	}
 }

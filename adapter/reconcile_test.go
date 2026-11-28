@@ -452,6 +452,33 @@ func TestQuotaRefusesWithoutEvicting(t *testing.T) {
 	}
 }
 
+func TestOutboxRejectsMismatchedPayloadKind(t *testing.T) {
+	w := newStoreWorld(t)
+	o := testOutbox(t)
+	op, err := w.store.Prepare(w.contract.ID(), "lock-mismatch", "lock", "checked artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := EncodeOperation(op, nex.Sign(w.buyer, "operation", op), w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Envelope claims KindProtocol while SignedObject encodes KindAgreement.
+	bad := OutboundItem{
+		Version:      Version,
+		Tenant:       tenant,
+		AgreementID:  w.contract.ID(),
+		OperationID:  "lock-mismatch",
+		Kind:         KindProtocol,
+		SignedObject: raw,
+		Destination:  "authority-1",
+		CreatedAt:    w.now,
+	}
+	if err := o.Enqueue(bad); !errors.Is(err, ErrItem) {
+		t.Fatalf("mismatched kind Enqueue = %v, want ErrItem", err)
+	}
+}
+
 func mustView(t *testing.T, w protocolWorld) nex.ProtocolView {
 	t.Helper()
 	v, err := w.store.View(w.id)
